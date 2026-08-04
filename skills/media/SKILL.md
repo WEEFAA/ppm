@@ -136,9 +136,3 @@ These docs ship with this skill (same folder). Read them, do not guess:
 - `frame-metadata.json` — metadata terms, colour-design principles, the inspector contract
 - `scene-schema.json` — the synthesis format; what `ppm-prompt` emits and `scene.hpp` accepts
 - `design-tokens.json` — named render presets and cosine palettes for shaders
-
-Docs that apply only when working inside the ppm repository:
-
-- `docs/ppm-ffmpeg.json` — PPM spec and ffmpeg flags (handled by the binaries)
-- `docs/cli-design.json` — CLI conventions
-- `docs/design-principles.json` — dependency policy and standing decisions
