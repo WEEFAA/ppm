@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CLI design conventions",
+  "purpose": "The rules the tools in bin/ follow, and the reasoning. Informed by the guidance at bettercli.org, narrowed to what a small single-purpose tool actually needs.",
+  "scope_note": "Deliberately omitted for now: version flags, update checks, telemetry, config files, shell completions, subcommands. Each is a real cost and none is needed yet. Add one when a concrete need appears, not pre-emptively.",
+
+  "streams": {
+    "rule": "stdout is for requested data only. Everything else goes to stderr.",
+    "why": "This is what makes the tools pipeable. A single stray progress line on stdout corrupts a PPM stream, and the failure appears inside ffmpeg as an unrelated decode error.",
+    "applies_to": ["progress", "warnings", "errors", "informational notes", "compiler output"]
+  },
+
+  "success_and_silence": {
+    "rule": "Say nothing on success beyond a single confirmation line on stderr, suppressible with --quiet.",
+    "why": "Following cp and mv: a tool that succeeded has nothing to report. Output should be reserved for cases where the output IS the result.",
+    "note": "The confirmation goes to stderr, not stdout, so it never joins piped data."
+  },
+
+  "progress": {
+    "rule": "Show progress only when stderr is an interactive terminal.",
+    "implementation": "isatty(fileno(stderr)) in the C++ runtime; [[ -t 2 ]] in bash.",
+    "why": "In a CI log or a redirected file, a carriage-return progress line becomes thousands of unreadable lines. Nobody is watching, so there is nothing to show.",
+    "when": "Only for work long enough to warrant it. Rendering qualifies; parsing arguments does not."
+  },
+
+  "exit_codes": {
+    "used": {"0": "success", "1": "runtime failure", "2": "usage error"},
+    "rationale": "bettercli's advice is to stay binary (0/1) unless there is a real reason for more. The one distinction kept is usage error versus runtime failure, because a caller genuinely wants to treat them differently: a usage error means the command will never work and should not be retried, while a runtime failure may be transient.",
+    "nuance_belongs_in_stderr": "Anything finer-grained than that goes in the message, not the code.",
+    "pipeline_caveat": {
+      "problem": "With `set -o pipefail`, a pipeline reports the rightmost failing command's status. When the renderer rejects an argument and exits 2, ffmpeg then fails on a truncated stream and its exit code (e.g. 234) masks the useful one.",
+      "solution": "Inspect PIPESTATUS and let the producer's status win, since it holds the real diagnosis.",
+      "note": "This was a live bug in this project's CLI, not a hypothetical."
+    }
+  },
+
+  "errors": {
+    "format": "<prog>: <what went wrong>",
+    "rules": [
+      "Name the tool, so the source is unambiguous in a pipeline.",
+      "State what was wrong with the input that was actually given, quoting it.",
+      "For an invalid choice, list the valid ones. `unknown parameter 'nope'` followed by `known parameters: octaves warp gain` turns a dead end into a fix.",
+      "On a usage error, point at --help rather than printing the whole help text.",
+      "No stack traces, no error codes to look up, no apologies."
+    ],
+    "example": "plasma: unknown parameter 'nope'\n  known parameters: octaves warp gain"
+  },
+
+  "flags": {
+    "conventions": [
+      "Long flags are the primary interface; short flags only for the ones typed constantly (-o, -s, -j, -q, -h).",
+      "GNU-style double dashes. No single-dash long flags.",
+      "The primary required argument is positional -- `ppmr shaders/plasma.cpp` -- with --shader accepted as an explicit alias.",
+      "Repeatable flags for repeatable things: --set NAME=VALUE once per parameter, rather than a comma-separated list that then needs its own escaping rules.",
+      "Composite values only where they are conventionally written that way: --size 1920x1080 rather than --width and --height.",
+      "Optional flag arguments are avoided except where the default is obvious (--preview with no number means frame 0).",
+      "Every default is stated in --help. A default that has to be discovered by experiment is a bug."
+    ],
+    "naming": [
+      "Name after intent, not mechanism: --samples, not --ssaa-grid-n.",
+      "Prefer positive forms. --top-left-origin, not --no-flip-y."
+    ]
+  },
+
+  "help": {
+    "structure": ["one-line summary", "USAGE with synopsis lines", "OPTIONS aligned in two columns", "EXAMPLES", "EXIT STATUS"],
+    "rules": [
+      "Fits on one screen. If it does not, the tool is doing too much.",
+      "Examples are the most-read section. Include the common case first, then two or three showing composition.",
+      "Help goes to stdout and exits 0 when requested with --help, because it was the requested output. Running with no arguments prints it to stderr and exits 2, because that was an error.",
+      "A shader binary's --help lists its own parameters with defaults and descriptions, generated from the Param declarations. The CLI needs no knowledge of any specific shader."
+    ]
+  },
+
+  "composability": {
+    "rule": "Each tool does one thing and hands off through a file or a pipe.",
+    "shape": "ppm-gen writes a shader file -> ppmr renders it. Neither needs to know the other exists.",
+    "why": "Generation and rendering fail for entirely different reasons and are used at different rates. Fusing them would mean re-running a network call to re-render at a different resolution.",
+    "consequence": "Both remain useful alone: hand-written shaders never touch ppm-gen, and a generated shader is an ordinary file that can be edited and committed."
+  },
+
+  "caching": {
+    "rule": "Cache keys must cover every input that affects the output.",
+    "implementation": "The compile cache keys on the shader source, every header it may include, and the compiler command line.",
+    "why": "A cache keyed on the source alone serves a stale binary after a header change -- and the symptom is a wrong image, not an error, which is much worse.",
+    "atomicity": "Compile to a temporary name and rename on success, so an interrupted or failed build never leaves a broken binary that later looks like a cache hit."
+  },
+
+  "safety": {
+    "rules": [
+      "Never overwrite without being asked, except at an explicitly given --output path.",
+      "--dry-run prints the exact commands that would run, so a pipeline can be inspected or copied.",
+      "A generated shader is code that will be compiled and executed. ppm-gen writes it to a file and stops; it does not run it. Review before rendering."
+    ]
+  }
+}

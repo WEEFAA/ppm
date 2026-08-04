@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PPM format and ffmpeg pipeline reference",
+  "purpose": "Verified facts about the Netpbm PPM format and how ffmpeg ingests it. Every claim here was checked against the vendored ffmpeg source tree or an executed command, not recalled.",
+  "verified_against": {
+    "ffmpeg_version": "8.0.git",
+    "commit": "9862dd83b1645b0c6e39b318aefb896138ffb08e",
+    "source_files": [
+      "libavcodec/pnm.c -- ff_pnm_decode_header, the actual header parser",
+      "libavcodec/pnmdec.c -- sample decoding and maxval scaling",
+      "libavcodec/pnm_parser.c -- splits a concatenated stream into frames",
+      "libavformat/img2dec.c -- image2 / image2pipe / ppm_pipe demuxers"
+    ]
+  },
+  "why_ppm": {
+    "rationale": "PPM is the lowest-friction way to get pixels out of a program and into a video encoder. The encoder is the only dependency; the format itself needs no library.",
+    "properties": [
+      "Header is plain ASCII, body is raw bytes. A conforming writer is about five lines of code.",
+      "No compression, no chunk framing, no checksums, so nothing can be subtly malformed.",
+      "Streamable: frames concatenate directly, which is what lets us pipe instead of staging files.",
+      "Supported by essentially every image tool, and by ffmpeg as a first-class demuxer."
+    ],
+    "costs": [
+      "Uncompressed: width * height * 3 bytes per frame. 1920x1080 is 6.2 MB/frame, ~373 MB/s at 60fps.",
+      "No alpha channel. Use PAM (P7) if alpha is genuinely required.",
+      "8 bits per channel at maxval 255, so heavy post-grading will band. Use maxval 65535 for 16-bit."
+    ]
+  },
+  "format": {
+    "magic_numbers": {
+      "P1": {
+        "kind": "bitmap",
+        "encoding": "ascii",
+        "ffmpeg_pix_fmt": "MONOWHITE"
+      },
+      "P2": {
+        "kind": "graymap",
+        "encoding": "ascii",
+        "ffmpeg_pix_fmt": "GRAY8"
+      },
+      "P3": {
+        "kind": "pixmap",
+        "encoding": "ascii",
+        "ffmpeg_pix_fmt": "RGB24"
+      },
+      "P4": {
+        "kind": "bitmap",
+        "encoding": "binary",
+        "ffmpeg_pix_fmt": "MONOWHITE"
+      },
+      "P5": {
+        "kind": "graymap",
+        "encoding": "binary",
+        "ffmpeg_pix_fmt": "GRAY8"
+      },
+      "P6": {
+        "kind": "pixmap",
+        "encoding": "binary",
+        "ffmpeg_pix_fmt": "RGB24",
+        "recommended": true
+      },
+      "P7": {
+        "kind": "PAM, arbitrary channel count",
+        "encoding": "binary",
+        "note": "keyword header terminated by ENDHDR; supports alpha and 16-bit"
+      },
+      "Pf": {
+        "kind": "float grayscale",
+        "ffmpeg_pix_fmt": "GRAYF32"
+      },
+      "PF": {
+        "kind": "float RGB",
+        "ffmpeg_pix_fmt": "GBRPF32",
+        "note": "for HDR output; header carries a scale whose sign encodes endianness"
+      }
+    },
+    "use": "P6. It is binary (so writing is a single fwrite of the whole frame), it is RGB, and it is the most widely supported.",
+    "p6_layout": {
+      "header": "P6 <ws> width <ws> height <ws> maxval <single whitespace byte>",
+      "canonical_bytes": "P6\\n<width> <height>\\n<maxval>\\n",
+      "then": "width * height * 3 samples, row-major, top row first, R then G then B per pixel",
+      "example_header_length": "\"P6\\n64 36\\n255\\n\" is 13 bytes; header length varies with the digit count, so never hardcode it"
+    },
+    "rules": [
+      "Whitespace between header fields is any run of space, LF, CR or TAB (ffmpeg pnm_space()).",
+      "Exactly ONE whitespace byte separates maxval from the pixel data. Additional whitespace would be read as pixel data.",
+      "A '#' in the header starts a comment that runs to the end of the line. Comments are legal but pointless in generated output, and a '#' appearing in binary pixel data is NOT a comment.",
+      "maxval must be > 0 and <= 65535. ffmpeg rejects 0 and anything larger.",
+      "maxval <= 255 means one byte per sample. maxval >= 256 means TWO bytes per sample, big-endian.",
+      "Rows are written top-to-bottom. This is the opposite of the GLSL/OpenGL convention, which is the single most common source of vertically mirrored output."
+    ],
+    "maxval_scaling_gotcha": {
+      "what": "ffmpeg rescales samples when maxval is not exactly 255 (or 65535 for 16-bit).",
+      "detail": "pnmdec.c computes a fixed-point factor and remaps every sample to the full 8- or 16-bit range. maxval 255 hits the no-op path.",
+      "implication": "Always write maxval 255 for 8-bit output. A value like 100 still decodes, but every sample is multiplied, so your bytes are not the bytes ffmpeg sees.",
+      "source": "libavcodec/pnmdec.c, the `upgrade` branches"
+    },
+    "byte_conversion": {
+      "correct": "clamp the float to [0,1] first, then scale: v <= 0 ? 0 : v >= 1 ? 255 : (unsigned char)(v * 255 + 0.5)",
+      "wrong": "(unsigned char)(v * 255) with no clamp",
+      "why": "An unclamped value above 1.0 wraps modulo 256, so an over-bright highlight becomes a dark speckle. Shaders that tonemap with tanh() rarely exceed 1, but any additive accumulation can, and the artefact looks like sensor noise rather than clipping.",
+      "rounding": "The + 0.5 matters: truncation biases every channel down by an average of half a level, which shows up as a slight overall darkening."
+    }
+  },
+  "ffmpeg_ingest": {
+    "two_strategies": {
+      "file_sequence": {
+        "how": "Write numbered files, then read them with a printf pattern.",
+        "command": "ffmpeg -framerate 60 -i frame%04d.ppm -c:v libx264 out.mp4",
+        "demuxer": "image2",
+        "pros": [
+          "Frames are inspectable and re-encodable without re-rendering.",
+          "A crashed render leaves usable partial output."
+        ],
+        "cons": [
+          "Needs disk space equal to the full uncompressed sequence.",
+          "Thousands of file creations; on network or container filesystems this dominates runtime."
+        ],
+        "pattern_note": "%04d must match the zero-padding actually written. %02d will not find frame0000.ppm. Use -start_number if the sequence does not begin at 0."
+      },
+      "pipe": {
+        "how": "Write concatenated P6 frames to stdout and pipe them straight into ffmpeg.",
+        "command": "./shader | ffmpeg -f ppm_pipe -framerate 60 -i - -c:v libx264 out.mp4",
+        "demuxer": "ppm_pipe (or: -f image2pipe -c:v ppm)",
+        "preferred": true,
+        "pros": [
+          "Zero disk I/O for intermediates.",
+          "Render and encode overlap, so encoding is nearly free in wall-clock terms.",
+          "No filename padding to get wrong."
+        ],
+        "cons": [
+          "Nothing to inspect afterwards unless you also tee the frames.",
+          "A crash loses the whole render."
+        ],
+        "how_splitting_works": "libavcodec/pnm_parser.c scans for the next 'P6' header and computes each frame's exact byte length from its own width/height/maxval. That is why a bare concatenation of frames -- with no container, no separators, no index -- is a valid stream.",
+        "explicit_f_required": "Give -f ppm_pipe explicitly when reading stdin. Probing a pipe is less reliable than probing a file, and the failure mode is a confusing 'invalid data' rather than a clear message."
+      }
+    },
+    "framerate_flag_placement": {
+      "severity": "high",
+      "rule": "-framerate N BEFORE -i sets the INPUT rate. -r N AFTER -i sets the OUTPUT rate and resamples by duplicating or dropping frames.",
+      "measured_example": {
+        "input": "30 PPM frames",
+        "command_a": "ffmpeg -i frame%04d.ppm -r 60 out.mp4",
+        "result_a": "72 frames, duration 1.20s -- input decoded at the image2 default of 25fps, then upsampled to 60fps",
+        "command_b": "ffmpeg -framerate 60 -i frame%04d.ppm out.mp4",
+        "result_b": "30 frames, duration 0.50s -- correct",
+        "note": "This was measured with the vendored build, not inferred. Command A is the form used in most PPM tutorials, including the gist this project started from, and it silently produces a 2.4x frame-duplicated file."
+      },
+      "default_input_rate": "25 fps, from the `framerate` AVOption on the image2/image2pipe demuxers (libavformat/img2dec.c). It is a decode-side option, which is why placement matters."
+    },
+    "frame_duplication_on_decode": {
+      "severity": "high",
+      "rule": "When decoding to a frame stream, pass -fps_mode passthrough (an OUTPUT option, so after -i). Without it ffmpeg conforms output to a constant rate taken from r_frame_rate and DUPLICATES frames to fill the gaps.",
+      "measured_example": {
+        "source": "920x1200 .mov screen capture, variable rate",
+        "ffprobe_r_frame_rate": "120/1",
+        "ffprobe_avg_frame_rate": "32400/563, i.e. 57.55 fps",
+        "ffprobe_nb_read_frames": 270,
+        "without_flag": "563 frames emitted -- 4.69s x 120fps",
+        "with_flag": "270 frames emitted, matching the source"
+      },
+      "why_it_matters_beyond_speed": "The duplicates are byte-identical to their predecessors, so they read as HELD frames. Analysis then reported the sequence as animated 'on twos' with 55% holds, which was a property of our own decode command rather than of the content. After the fix the same clip reads 'on ones' with 8% holds. A measurement pipeline that decodes carelessly will confidently describe its own artefacts.",
+      "companion_rule": "Use avg_frame_rate, not r_frame_rate, to time the output. r_frame_rate is an upper bound on the timebase; timing 270 frames at 120fps instead of 57.5 would play the result at over twice speed."
+    },
+    "demuxer_options": {
+      "framerate": "input frame rate; default 25",
+      "pixel_format": "override the detected pixel format",
+      "video_size": "only needed for headerless raw input; PPM carries its own size",
+      "loop": "repeat the input sequence indefinitely",
+      "frame_size": "force a fixed frame size in bytes for pipes; not needed for PPM since the parser derives it"
+    },
+    "encoding_notes": {
+      "pix_fmt": "Add -pix_fmt yuv420p for H.264 in MP4. Without it, an RGB input may select yuv444p, which many players and browsers refuse.",
+      "color_range": "Add -color_range tv to silence 'Color range not set' and make the range explicit.",
+      "faststart": "-movflags +faststart moves the MP4 index to the front so the file streams before it is fully downloaded.",
+      "bitrate_for_synthetic": "Procedural gradients compress far better than camera footage. About 0.08 bits per pixel per second is visually clean, roughly 4.4 Mbps at 1280x720x60.",
+      "gif": "GIF needs a palette stage or it quantises to a default palette and gradients band badly. One pass: -filter_complex \"split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3\"",
+      "lossless_intermediate": "-c:v ffv1 -level 3 -pix_fmt rgb24 in .mkv, for regrading without re-rendering.",
+      "encoder_availability": "A minimal build has no H.264 encoder unless an external library or a platform encoder is enabled. On macOS, h264_videotoolbox needs no external dependency. Otherwise libx264 (GPL), or fall back to the native mpeg4 encoder."
+    }
+  },
+  "building_a_minimal_ffmpeg": {
+    "why": "Keeps the dependency surface to the C library plus a platform encoder, and guarantees the ppm_pipe demuxer exists.",
+    "clone": "git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git ffmpeg",
+    "configure": "./configure --disable-doc --disable-network --disable-autodetect --disable-debug --enable-zlib --enable-videotoolbox",
+    "notes": [
+      "--disable-autodetect refuses every optional external library, so the build cannot silently pick up whatever happens to be installed. That is what makes it reproducible.",
+      "--enable-zlib must be given back explicitly, because --disable-autodetect turns it off and without zlib there is no PNG encoder. This was hit in practice: still-image export failed with 'Default encoder for format image2 (codec png) is probably disabled'.",
+      "--enable-videotoolbox is macOS-only and provides h264_videotoolbox, a hardware H.264 encoder with no third-party dependency.",
+      "On x86 a full build wants nasm for hand-written assembly. On arm64 it is not required."
+    ],
+    "no_make_install_needed": "The binaries are usable in place at ffmpeg/ffmpeg and ffmpeg/ffprobe."
+  },
+  "version_pinning": {
+    "rule": "The ffmpeg revision is pinned in ffmpeg.lock and `make ffmpeg` refuses to build anything else.",
+    "why": "`git clone --depth 1` takes whatever HEAD happens to be that day, so two machines building a month apart get different decoders. This project's numbers -- frame timing, reconstruction error -- are the deliverable, and they are only comparable across runs if the decoder is identical.",
+    "ffprobe": "ffprobe has no repository of its own; it is built from the same tree, so one pin covers both binaries. Verified: both report git-2026-08-03-9862dd8.",
+    "verification_placement": "The check is a phony prerequisite, not part of the build rule. Folded into the rule it is skipped whenever the binary already exists -- exactly the case where a checkout has drifted off the pin.",
+    "moving_the_pin": "`make ffmpeg-update` is deliberately separate: changing the decoder changes measured output, so it must never happen as a side effect of `make`."
+  }
+}

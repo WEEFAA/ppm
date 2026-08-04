@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# ===========================================================================
+#  ppmr -- compile a CPU shader and render it to video.
+#
+#  Pipeline:
+#      shader.cpp --[c++]--> binary --[P6 stream on stdout]--> ffmpeg --> video
+#
+#  Nothing is written to disk between the shader and ffmpeg: frames exist only
+#  as bytes in a pipe. A 4K 10-second render would be 25 GB of intermediate PPM
+#  if it were staged as files, and 0 bytes this way.
+#
+#  Conventions (see docs/cli-design.json):
+#    * stdout carries only requested data; all diagnostics go to stderr.
+#    * Silent on success.
+#    * Progress is shown only on an interactive terminal.
+#    * Exit 0 success, 1 failure, 2 usage error.
+# ===========================================================================
+set -euo pipefail
+
+readonly PROG=${0##*/}
+readonly ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+
+# --- exit codes ------------------------------------------------------------
+readonly EX_OK=0 EX_FAIL=1 EX_USAGE=2
+
+die()   { printf '%s: %s\n' "$PROG" "$1" >&2; exit "${2:-$EX_FAIL}"; }
+usage_die() {
+  printf '%s: %s\n' "$PROG" "$1" >&2
+  printf "Try '%s --help' for more information.\n" "$PROG" >&2
+  exit $EX_USAGE
+}
+note()  { [[ $QUIET -eq 1 ]] || printf '%s: %s\n' "$PROG" "$1" >&2; }
+
+usage() {
+  cat <<EOF
+$PROG -- render a CPU fragment shader to video
+
+USAGE
+  $PROG [--shader] FILE [options]
+  $PROG --list
+
+  The output container picks the encoder:
+    .mp4 .mov   H.264      .mkv   FFV1 (lossless)
+    .gif        GIF        .ppm   raw P6 stream
+    .png .jpg   still image (implies --preview)
+
+OPTIONS
+  -o, --output PATH      output file (default: <shader>.mp4)
+      --size WxH         frame size (default 1280x720)
+      --fps N            frames per second (default 60)
+      --frames N         frame count (default 240)
+      --duration SEC     set frame count from a duration
+  -s, --samples N        NxN supersampling; 2 or 3 removes most aliasing
+  -j, --threads N        worker threads (default: all cores)
+      --set NAME=VALUE   shader parameter, repeatable (see --help on a shader)
+      --preview [N]      render only frame N (default 0) as a still
+      --bitrate RATE     video bitrate, e.g. 8M (default: from resolution)
+      --frames-dir DIR   also keep numbered PPM frames in DIR
+      --ffmpeg PATH      ffmpeg binary to use
+      --dry-run          print the commands instead of running them
+      --rebuild          ignore the compile cache
+  -q, --quiet            suppress progress
+  -h, --help             show this help
+
+EXAMPLES
+  $PROG shaders/plasma.cpp
+  $PROG shaders/flow.cpp -o flow.mp4 --size 1920x1080 -s 2 --duration 6
+  $PROG shaders/rings.cpp --preview --set count=14 -o rings.png
+  $PROG shaders/plasma.cpp --set gain=8 --set octaves=12
+
+EXIT STATUS
+  0 success    1 failure    2 usage error
+EOF
+}
+
+# --- defaults --------------------------------------------------------------
+SHADER=""; OUTPUT=""; SIZE="1280x720"; FPS=60; FRAMES=240; DURATION=""
+SAMPLES=1; THREADS=""; PREVIEW=""; BITRATE=""; FRAMES_DIR=""
+FFMPEG_BIN=""; DRY_RUN=0; REBUILD=0; QUIET=0
+declare -a SET_ARGS=()
+
+[[ $# -eq 0 ]] && { usage; exit $EX_USAGE; }
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)    usage; exit $EX_OK ;;
+    --list)
+      shopt -s nullglob
+      for f in "$ROOT"/shaders/*.cpp; do
+        desc=$(sed -n 's/^#define SHADER_DESCRIPTION "\(.*\)"$/\1/p' "$f" | head -1)
+        printf '%-28s %s\n' "shaders/${f##*/}" "$desc"
+      done
+      exit $EX_OK ;;
+    --shader)     SHADER=${2:?}; shift 2 ;;
+    -o|--output)  OUTPUT=${2:?}; shift 2 ;;
+    --size)       SIZE=${2:?}; shift 2 ;;
+    --fps)        FPS=${2:?}; shift 2 ;;
+    --frames)     FRAMES=${2:?}; shift 2 ;;
+    --duration)   DURATION=${2:?}; shift 2 ;;
+    -s|--samples) SAMPLES=${2:?}; shift 2 ;;
+    -j|--threads) THREADS=${2:?}; shift 2 ;;
+    --set)        SET_ARGS+=(--set "${2:?}"); shift 2 ;;
+    --bitrate)    BITRATE=${2:?}; shift 2 ;;
+    --frames-dir) FRAMES_DIR=${2:?}; shift 2 ;;
+    --ffmpeg)     FFMPEG_BIN=${2:?}; shift 2 ;;
+    --dry-run)    DRY_RUN=1; shift ;;
+    --rebuild)    REBUILD=1; shift ;;
+    -q|--quiet)   QUIET=1; shift ;;
+    --preview)
+      # Optional numeric argument.
+      if [[ ${2-} =~ ^[0-9]+$ ]]; then PREVIEW=$2; shift 2; else PREVIEW=0; shift; fi ;;
+    --) shift; break ;;
+    -*) usage_die "unknown option '$1'" ;;
+    *)  [[ -z $SHADER ]] || usage_die "unexpected argument '$1'"
+        SHADER=$1; shift ;;
+  esac
+done
+
+[[ -n $SHADER ]] || usage_die "no shader given"
+[[ -f $SHADER ]] || die "no such file: $SHADER"
+
+# --- resolve ffmpeg --------------------------------------------------------
+# Prefer the locally cloned and built ffmpeg: it is the version this project was
+# developed against, and it guarantees the ppm_pipe demuxer is present.
+if [[ -z $FFMPEG_BIN ]]; then
+  if [[ -x "$ROOT/ffmpeg/ffmpeg" ]]; then
+    FFMPEG_BIN="$ROOT/ffmpeg/ffmpeg"
+  elif command -v ffmpeg >/dev/null 2>&1; then
+    FFMPEG_BIN=$(command -v ffmpeg)
+  else
+    die "no ffmpeg found. Build the vendored copy:
+  git clone --depth 1 https://git.ffmpeg.org/ffmpeg.git ffmpeg
+  cd ffmpeg && ./configure --disable-doc --disable-autodetect --enable-zlib && make -j"
+  fi
+fi
+[[ -x $FFMPEG_BIN ]] || die "not executable: $FFMPEG_BIN"
+
+# --- derive settings -------------------------------------------------------
+[[ $SIZE =~ ^([0-9]+)x([0-9]+)$ ]] || usage_die "--size expects WxH, got '$SIZE'"
+W=${BASH_REMATCH[1]}; H=${BASH_REMATCH[2]}
+
+if [[ -n $DURATION ]]; then
+  FRAMES=$(awk -v d="$DURATION" -v f="$FPS" 'BEGIN{printf "%d", d*f + 0.5}')
+fi
+if [[ -z $OUTPUT ]]; then
+  base=${SHADER##*/}; base=${base%.cpp}
+  OUTPUT=$([[ -n $PREVIEW ]] && echo "$base.jpg" || echo "$base.mp4")
+fi
+out_base=${OUTPUT##*/}
+[[ $out_base == *.* ]] || usage_die "output '$OUTPUT' has no extension; the extension selects the format"
+
+# Create the output directory if it does not exist, so -o out/nested/x.mp4 works
+# without the caller having made the path first. ffmpeg will not create it, and
+# its error for a missing directory is opaque.
+out_dir=${OUTPUT%/*}
+if [[ $out_dir != "$OUTPUT" && -n $out_dir ]]; then
+  mkdir -p "$out_dir" || die "cannot create the directory '$out_dir'"
+fi
+ext=${OUTPUT##*.}; ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+
+# --- compile (cached) ------------------------------------------------------
+CXX=${CXX:-c++}
+CXXFLAGS=${CXXFLAGS:--std=c++17 -O3 -ffp-contract=off}
+CACHE="$ROOT/.cache"
+# Key the cache on the shader source, every header it may include, and the
+# flags. Any change invalidates, so a stale binary can never be run.
+key=$(cat "$SHADER" "$ROOT"/include/*.hpp <<<"$CXX $CXXFLAGS" | shasum -a 256 | cut -c1-16)
+name=${SHADER##*/}; name=${name%.cpp}
+BIN="$CACHE/$name-$key"
+
+if [[ $REBUILD -eq 1 || ! -x $BIN ]]; then
+  mkdir -p "$CACHE"
+  note "compiling $SHADER"
+  if ! $CXX $CXXFLAGS -I "$ROOT/include" -pthread -o "$BIN.tmp" "$SHADER" 2>"$CACHE/$name.log"; then
+    cat "$CACHE/$name.log" >&2
+    die "compile failed"
+  fi
+  # Only publish the cache entry after a successful build.
+  mv "$BIN.tmp" "$BIN"
+fi
+
+# --- shader invocation -----------------------------------------------------
+declare -a SHADER_CMD=("$BIN" --size "$SIZE" --fps "$FPS" --frames "$FRAMES" --samples "$SAMPLES")
+[[ -n $THREADS ]] && SHADER_CMD+=(--threads "$THREADS")
+[[ ${#SET_ARGS[@]} -gt 0 ]] && SHADER_CMD+=("${SET_ARGS[@]}")
+# --seq alone suppresses the stream, so ask for stdout explicitly: we want the
+# numbered frames kept AND the pipe to ffmpeg fed.
+[[ -n $FRAMES_DIR ]] && { mkdir -p "$FRAMES_DIR"; SHADER_CMD+=(--seq "$FRAMES_DIR/frame" -o -); }
+# Progress is noise unless a human is watching; also keeps CI logs clean.
+[[ $QUIET -eq 1 || ! -t 2 ]] && SHADER_CMD+=(-q)
+
+# --at emits one frame while keeping its position in the nominal sequence, so a
+# preview shows exactly the frame the full render would produce at that index.
+[[ -n $PREVIEW ]] && SHADER_CMD+=(--at "$PREVIEW")
+
+if [[ -n $PREVIEW && $PREVIEW -ge $FRAMES ]]; then
+  usage_die "--preview $PREVIEW is out of range for --frames $FRAMES"
+fi
+
+# --- ffmpeg invocation -----------------------------------------------------
+have_encoder() { "$FFMPEG_BIN" -hide_banner -encoders 2>/dev/null | grep -q " $1 "; }
+
+if [[ -z $BITRATE ]]; then
+  # ~0.08 bits per pixel per second: visually clean for synthetic gradients,
+  # which compress far better than camera footage.
+  BITRATE=$(awk -v w="$W" -v h="$H" -v f="$FPS" 'BEGIN{printf "%dk", (w*h*f*0.08)/1000}')
+fi
+
+declare -a FF=("$FFMPEG_BIN" -hide_banner -loglevel error -y
+               -f ppm_pipe -framerate "$FPS" -i -)
+
+case $ext in
+  mp4|mov)
+    if   have_encoder h264_videotoolbox; then
+      FF+=(-c:v h264_videotoolbox -b:v "$BITRATE" -allow_sw 1)
+    elif have_encoder libx264; then
+      FF+=(-c:v libx264 -preset slow -crf 18)
+    elif have_encoder mpeg4; then
+      note "no H.264 encoder available; falling back to MPEG-4 part 2"
+      FF+=(-c:v mpeg4 -b:v "$BITRATE")
+    else
+      die "no encoder available for .$ext"
+    fi
+    FF+=(-pix_fmt yuv420p -color_range tv -movflags +faststart)
+    ;;
+  mkv)
+    have_encoder ffv1 || die "no ffv1 encoder for lossless .mkv"
+    FF+=(-c:v ffv1 -level 3 -pix_fmt rgb24)
+    ;;
+  gif)
+    # Single pass: split the stream, build a palette from it, apply it. Without
+    # a palette stage GIF output quantises to the default 216-colour web
+    # palette and gradients band badly.
+    FF+=(-filter_complex
+         "split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer:bayer_scale=3")
+    ;;
+  ppm)
+    # Passthrough: skip ffmpeg entirely.
+    FF=()
+    ;;
+  png)
+    have_encoder png || die "this ffmpeg has no png encoder (needs zlib); use .jpg"
+    FF+=(-frames:v 1 -c:v png)
+    ;;
+  jpg|jpeg)
+    FF+=(-frames:v 1 -c:v mjpeg -q:v 2)
+    ;;
+  *) usage_die "unsupported output format '.$ext'" ;;
+esac
+[[ ${#FF[@]} -gt 0 ]] && FF+=("$OUTPUT")
+
+# --- run -------------------------------------------------------------------
+if [[ $DRY_RUN -eq 1 ]]; then
+  printf '%q ' "${SHADER_CMD[@]}"
+  if [[ ${#FF[@]} -gt 0 ]]; then printf '\\\n  | '; printf '%q ' "${FF[@]}"; fi
+  printf '\n'
+  exit $EX_OK
+fi
+
+if [[ ${#FF[@]} -eq 0 ]]; then
+  "${SHADER_CMD[@]}" > "$OUTPUT"
+else
+  # The shader's exit status is the meaningful one: if it rejects a --set or
+  # fails mid-render, ffmpeg then sees a truncated stream and reports its own
+  # (less useful) error. pipefail alone would surface ffmpeg's code and hide the
+  # shader's, so inspect both and let the shader's win.
+  set +e
+  "${SHADER_CMD[@]}" | "${FF[@]}"
+  status=("${PIPESTATUS[@]}")
+  set -e
+  if [[ ${status[0]} -ne 0 ]]; then
+    exit "${status[0]}"
+  elif [[ ${status[1]} -ne 0 ]]; then
+    die "ffmpeg failed (exit ${status[1]})"
+  fi
+fi
+
+note "wrote $OUTPUT"

@@ -1,0 +1,18 @@
+# Pinned ffmpeg revision.
+#
+# ffprobe has no repository of its own -- it is built from this same tree, so
+# pinning here pins both binaries to one commit. `make ffmpeg` refuses to build
+# if the checkout does not match.
+#
+# Why pin at all: `git clone --depth 1` takes whatever HEAD happens to be that
+# day, so two machines building a month apart get different decoders. Analysis
+# output is only comparable across runs if the decoder is identical, and this
+# project's numbers (frame timing, reconstruction error) are the deliverable.
+#
+# To move: change `commit`, run `make ffmpeg-update`, and re-check any measured
+# figures recorded in docs/.
+
+url=https://git.ffmpeg.org/ffmpeg.git
+commit=9862dd83b1645b0c6e39b318aefb896138ffb08e
+version=git-2026-08-03-9862dd8
+date=2026-07-30

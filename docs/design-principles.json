@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Design principles",
+  "purpose": "The standing decisions for this project: what it optimises for, what it refuses, and the reasoning behind each. Read this before adding a dependency, a flag, or an abstraction.",
+
+  "goal": {
+    "statement": "Generate video from procedural shaders on machines with no GPU.",
+    "motivation": "VPS instances, CI runners, containers and cheap cloud tiers frequently have no GPU allocation, or have one that is unavailable to unprivileged processes. A renderer that only needs a C++ compiler and ffmpeg runs anywhere.",
+    "non_goal": "Real-time interactive preview. Giving that up is what buys everything below."
+  },
+
+  "constraints": {
+    "dependencies": {
+      "rule": "ffmpeg, a C++17 compiler, and the C++ standard library. Nothing else in the render path.",
+      "rationale": "Every added dependency is a machine where this fails to build. The render path is deliberately buildable with a single c++ invocation and no build system at all.",
+      "allowed": [
+        "ffmpeg -- the encoder. Vendored and built from source so the version is pinned.",
+        "A C++17 compiler. Only <cmath>, <cstdio>, <vector>, <string>, <thread> are used.",
+        "bash for the CLI wrapper -- orchestration only, never in the render path.",
+        "python3 standard library for the generator CLI only, which is a development-time convenience and not required to render anything."
+      ],
+      "forbidden_without_discussion": [
+        "Any image, math, or vector library. pgl.hpp exists precisely so none is needed.",
+        "A build system. If the project needs one, the header layout has gone wrong.",
+        "Any package manager or lockfile in the render path.",
+        "Third-party python packages, including requests. urllib is in the standard library."
+      ]
+    },
+    "portability": [
+      "Assume POSIX. Windows support is via WSL, not via ifdefs.",
+      "Assume nothing about SIMD width or GPU presence.",
+      "Never rely on a math function existing only in one standard library's global namespace; pgl.hpp documents the specific ambiguity trap here."
+    ]
+  },
+
+  "architecture": {
+    "shader_is_a_pure_function": {
+      "contract": "vec4 mainImage(vec2 FC, const Uniforms& u) must be a pure function of its arguments.",
+      "why": "Purity is load-bearing, not stylistic. It is what makes three separate features free: row-parallel threading needs no locks; NxN supersampling can call the same function repeatedly; and --at can render frame 900 without rendering the first 899.",
+      "consequences": [
+        "No mutable globals, no static accumulators, no file or clock access.",
+        "No rand(). Use the hashes in pnoise.hpp, which are functions of position.",
+        "Anything time-dependent must arrive through Uniforms."
+      ]
+    },
+    "stream_do_not_stage": {
+      "rule": "Frames go from the renderer to the encoder through a pipe. Writing them to disk is opt-in.",
+      "why": "A 10-second 4K sequence is about 25 GB of uncompressed PPM. Piping makes that 0 bytes, and overlaps encoding with rendering so encode time largely disappears.",
+      "escape_hatch": "--frames-dir keeps the numbered frames as well, for re-encoding without re-rendering."
+    },
+    "compile_do_not_interpret": {
+      "rule": "A shader is C++ compiled to a native binary, not a script parsed at runtime.",
+      "why": "CPU shading is arithmetic-bound and runs the inner function millions of times per frame. An interpreter loses one to two orders of magnitude. -O3 on real C++ gives autovectorisation and inlining for free.",
+      "cost": "A one to four second compile per shader change, hidden behind a content-addressed cache.",
+      "accepted_tradeoff": "Shaders are trusted code. This project compiles and runs whatever it is pointed at, so a generated shader must be reviewed like any other code before it is run."
+    },
+    "no_hidden_state": "Identical arguments produce byte-identical output. Determinism is what makes visual regressions diffable."
+  },
+
+  "cpu_vs_gpu": {
+    "premise": "A CPU renderer is not a degraded GPU. The constraint profile is different, so the idioms should be too.",
+    "what_is_lost": {
+      "throughput": "Roughly two to three orders of magnitude fewer shading operations per second.",
+      "screen_space_derivatives": "dFdx, dFdy and fwidth cannot exist. A GPU shades in 2x2 quads and subtracts neighbours; a scalar CPU kernel has no neighbours. This is the single biggest porting obstacle and the reason aa.hpp exists.",
+      "texture_units": "No free bilinear filtering, mipmapping or wrap modes."
+    },
+    "what_is_gained": {
+      "no_time_budget": "Nothing must finish in 16 ms. A frame may take a second. This inverts the usual cost calculus: brute-force supersampling becomes the default antialiasing strategy rather than a luxury.",
+      "unrestricted_control_flow": "Deep recursion, early exit, variable-length loops and per-pixel branching cost what they cost, with no warp divergence penalty.",
+      "full_precision_and_debuggability": "Doubles are available if needed, and a shader can be run under a debugger, a profiler or a sanitiser like any other program.",
+      "no_driver": "No shader compiler bugs, no vendor differences, no context creation. Output is bit-identical across machines of the same architecture."
+    },
+    "guidance": "When porting a GPU shader, spend the budget the GPU could not: raise --samples instead of hand-tuning analytic antialiasing, and raise octave counts instead of faking detail."
+  },
+
+  "cli_philosophy": {
+    "summary": "Small, quiet, composable. See cli-design.json for the specific rules.",
+    "principles": [
+      "One tool per job: ppmr renders, ppm-gen generates. They compose through a file.",
+      "Silent on success. Output only what was asked for.",
+      "stdout carries data; stderr carries everything else. This is what makes piping possible at all.",
+      "Progress only on an interactive terminal.",
+      "No versioning, no telemetry, no update checks, no config file until one is actually needed."
+    ]
+  },
+
+  "visual_principles": {
+    "note": "Defaults that make generated output look deliberate rather than arbitrary. All are overridable; they are starting points, not rules.",
+    "items": [
+      {
+        "principle": "Tonemap, do not clamp",
+        "detail": "Accumulated brightness is unbounded. Compress it with tanh() or x/(1+x) so bright regions roll off instead of flat-clipping to white. Clipping is the most reliable tell of an amateur shader.",
+        "example": "col = tanh(col * exposure)"
+      },
+      {
+        "principle": "Never let black be pure black",
+        "detail": "Lift the floor by 0.01-0.03. Pure black reads as a hole in the image, and it also hides banding that a slight lift reveals so you can fix it."
+      },
+      {
+        "principle": "Aspect-correct by dividing by height, not by resolution",
+        "detail": "p = (FC * 2 - resolution) / resolution.y keeps the vertical range at [-1,1] and lets x extend with aspect. Dividing by resolution stretches the image with the window."
+      },
+      {
+        "principle": "Derive colour from phase, not from a palette lookup",
+        "detail": "Offsetting the same expression per channel, or using three phase-shifted cosines, produces continuous in-gamut colour with no table and no interpolation seams."
+      },
+      {
+        "principle": "Antialias by construction",
+        "detail": "Smooth edges are cheaper to produce than to repair. Prefer an SDF with analytic coverage, or supersampling, over post-process blurring."
+      },
+      {
+        "principle": "Loop seamlessly by making time an angle",
+        "detail": "Drive animation from u.phase * TAU, and give every time-dependent term an integer frequency, so the last frame joins the first exactly. Scrolling or translating cannot loop."
+      },
+      {
+        "principle": "Vignette gently",
+        "detail": "A falloff of about 1 - 0.35 * dot(p,p) focuses attention without reading as a filter."
+      },
+      {
+        "principle": "Prefer vector operations to angles",
+        "detail": "Converting a vector to an angle with atan and back with cos/sin is usually a sign of an overcomplicated formulation, and trig is comparatively expensive. Rotate with a matrix, compare with a dot product."
+      }
+    ]
+  },
+
+  "review_checklist": [
+    "Is mainImage still pure? No statics, no rand, no clock.",
+    "Does it use u.phase (not u.time) if it is meant to loop?",
+    "Are out-of-range colours tonemapped rather than clipped?",
+    "Does it divide by resolution.y for aspect correction?",
+    "Does it depend on dFdx/fwidth? Those do not exist; use aa.hpp or --samples.",
+    "Are magic constants exposed as Param so they can be swept from the CLI?",
+    "Does it render correctly at 1 sample, or does it need --samples to look acceptable? Both are valid, but say which."
+  ]
+}

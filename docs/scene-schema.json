@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Scene parameters schema",
+  "purpose": "The synthesis format: what scene.hpp accepts, and what a generator must emit. This file is the single source of truth for the format, and ppm-prompt builds its system prompt from it -- so changing the format means changing this file, not the generator.",
+
+  "why_parameters_and_not_code": [
+    "Nothing executes generated output. A scene is data, validated on load, so a bad generation is a rejected file rather than a running program.",
+    "Every render is reproducible and editable. The parameters that produced a video are written beside it, so it can be re-rendered at another resolution or hand-tweaked without re-running analysis or a model.",
+    "All three CLIs converge on one representation, so an analysis-derived scene and a model-generated scene are the same kind of object and can be diffed, merged, or interpolated."
+  ],
+
+  "animation": {
+    "rule": "ANY numeric parameter may be either a constant or an animation object. This is what keeps the schema flat -- there is no separate keyframe block that has to be kept in sync with the layers it refers to.",
+    "constant": 2.5,
+    "animated": {
+      "from": 1.0,
+      "to": 2.0,
+      "easing": "smoothstep",
+      "loop": false
+    },
+    "fields": {
+      "from": "value at phase 0",
+      "to": "value at phase 1",
+      "easing": "one of the easings listed below; an unknown name degrades to linear rather than failing",
+      "loop": "true ping-pongs the value so it returns to `from` at phase 1, which is what makes a clip loop seamlessly"
+    },
+    "phase": "Every animation is driven by phase = frame / frames, in [0,1). Nothing reads wall-clock time, which is why renders are reproducible.",
+    "easings": ["linear", "smoothstep", "smootherstep", "ease_in_quad", "ease_out_quad", "ease_in_cubic", "ease_out_cubic", "ease_in_out_sine", "pulse", "constant"]
+  },
+
+  "structure": {
+    "output": {
+      "required": true,
+      "fields": {
+        "width": "pixels, > 0",
+        "height": "pixels, > 0",
+        "frames": "frame count, > 0",
+        "fps": "frames per second",
+        "samples": "NxN supersampling per pixel, 1..8. Cost is samples squared."
+      },
+      "limits": "width * height must not exceed 80 megapixels; samples must be 1..8. Both are rejected at load rather than after allocating."
+    },
+    "background": {
+      "required": false,
+      "type": "[r, g, b] in 0..1",
+      "note": "The base colour layers composite onto. Defaults to black."
+    },
+    "tone": {
+      "required": false,
+      "note": "Applied after all layers, in this fixed order: exposure, temperature, tonemap, saturation, contrast, vignette, black_floor. The order matters -- black_floor is last so it is not multiplied away by the vignette.",
+      "fields": {
+        "exposure": "multiplier before tonemapping. Default 1.",
+        "temperature": "-1 cool .. +1 warm. Trims red against blue.",
+        "tonemap": "\"none\" | \"tanh\" | \"reinhard\". Use tanh or reinhard whenever layers ADD, because sums exceed 1 and a hard clip flat-clips highlights to white.",
+        "saturation": "0 greyscale, 1 unchanged, >1 boosted.",
+        "contrast": "pivots around 0.5.",
+        "vignette": "0..1 radial darkening. About 0.35 focuses attention without reading as a filter.",
+        "black_floor": "lifts the darkest value. 0.01-0.03 keeps shadows from reading as holes and makes banding visible enough to fix."
+      }
+    },
+    "transform": {
+      "required": false,
+      "note": "A global camera move applied to the sampling coordinates. Zoom and rotate act about the frame centre.",
+      "fields": {
+        "pan_x": "fraction of frame width",
+        "pan_y": "fraction of frame height",
+        "zoom": "1 = neutral; > 1 magnifies",
+        "rotate": "turns, so 0.25 is a quarter turn"
+      },
+      "warning": "For a reconstructed VIDEO the motion is already present in the per-frame essence grids, so a transform here would double it. It is the right place for motion only when synthesising, or when animating a single still."
+    },
+    "layers": {
+      "required": true,
+      "note": "Composited in order, first is bottom. Each has type, blend, opacity and a type-specific params object.",
+      "blend_modes": ["normal", "add", "multiply", "screen", "overlay"],
+      "types": {
+        "reconstruct": {
+          "purpose": "Expand a measured essence grid back to full resolution. The core of ppm-video and ppm-media.",
+          "params": {
+            "detail": "0..1, procedural texture standing in for frequencies the grid discarded. Multiplied internally by the MEASURED high_freq_ratio, so a flat source gets no invented texture however high this is set.",
+            "scale": "detail frequency; should track the grid size, because what was lost is the band finer than the grid",
+            "seed": "offsets the detail noise"
+          },
+          "note": "Requires essence grids supplied by the tool. A generated scene cannot use this type -- there is nothing to reconstruct."
+        },
+        "gradient": {
+          "purpose": "Linear gradient across the frame.",
+          "params": {"angle": "in turns; 0 is left-to-right", "colors": "array of [r,g,b], interpolated in linear light"}
+        },
+        "radial": {
+          "purpose": "Gradient by distance from centre.",
+          "params": {"scale": "how quickly the ramp is traversed", "colors": "array of [r,g,b]"}
+        },
+        "fbm": {
+          "purpose": "Fractal noise; the workhorse for clouds, smoke, marble, terrain.",
+          "params": {
+            "scale": "frequency, roughly cycles across the half-height. 1 broad, 2.4 default, 6 detailed.",
+            "warp": "domain-warp strength. The cheapest route from bland noise to something structural; 0.85 is a good default.",
+            "count": "octaves, 3 cheap to 8 rich. Cost is linear, and a CPU can afford more than a GPU.",
+            "detail": "extra contrast on the noise",
+            "seed": "decorrelates one fbm layer from another",
+            "colors": "array of [r,g,b] used as a ramp"
+          }
+        },
+        "worley": {
+          "purpose": "Cellular / Voronoi texture: scales, cracks, bubbles, caustics.",
+          "params": {"scale": "cell density", "speed": "drift rate", "colors": "ramp"}
+        },
+        "rings": {
+          "purpose": "Concentric bands.",
+          "params": {"count": "number of rings", "thickness": "0..0.5 fraction of spacing", "speed": "rings per loop", "colors": "ramp"}
+        },
+        "grain": {
+          "purpose": "Per-frame noise. Reseeded every frame, so it reads as film rather than as a dirty lens.",
+          "params": {"detail": "amplitude; 0.01-0.05 is subtle, above 0.1 is heavy"},
+          "note": "Use blend \"add\"."
+        },
+        "vignette": {
+          "purpose": "A vignette as a layer, for when it should sit under later layers rather than over everything.",
+          "params": {"detail": "strength"},
+          "note": "Use blend \"multiply\". For a simple final vignette, prefer tone.vignette."
+        }
+      }
+    }
+  },
+
+  "authoring_guidance": {
+    "note": "Advice for producing a scene that reads as deliberate. None of it is enforced.",
+    "items": [
+      "Build in layers, bottom-up: a background wash, one or two structural layers, then grain and vignette. Three to five layers is usually enough; more tends to turn to mud.",
+      "If any layer uses blend \"add\" or \"screen\", set tone.tonemap to \"tanh\" or \"reinhard\". Additive layers exceed 1 and a hard clip flat-clips highlights to white, which is the most reliable tell of a careless render.",
+      "Keep tone.black_floor at 0.01-0.03. Pure black reads as a hole.",
+      "Give at least one parameter an animation, or the clip is a still. Motion in scale, warp or transform.zoom reads as alive; motion in colour usually reads as a glitch.",
+      "For a seamless loop set \"loop\": true on every animation, so each value returns to its start.",
+      "Take colours from a coherent palette rather than picking them independently. docs/design-tokens.json has tuned cosine palettes; a 2-3 colour ramp from dark to bright is a reliable default.",
+      "Prefer few strong ideas over many weak ones. One well-warped fbm beats four competing textures."
+    ]
+  },
+
+  "example": {
+    "output": {"width": 1280, "height": 720, "frames": 240, "fps": 30, "samples": 1},
+    "background": [0.02, 0.02, 0.05],
+    "tone": {
+      "exposure": 1.1,
+      "tonemap": "tanh",
+      "saturation": 1.05,
+      "contrast": 1.05,
+      "vignette": 0.35,
+      "black_floor": 0.02
+    },
+    "transform": {
+      "zoom": {"from": 1.0, "to": 1.15, "easing": "ease_in_out_sine", "loop": true},
+      "rotate": 0.0
+    },
+    "layers": [
+      {
+        "type": "gradient",
+        "blend": "normal",
+        "opacity": 1.0,
+        "params": {"angle": 0.25, "colors": [[0.03, 0.04, 0.10], [0.10, 0.16, 0.30]]}
+      },
+      {
+        "type": "fbm",
+        "blend": "screen",
+        "opacity": 0.85,
+        "params": {
+          "scale": {"from": 2.2, "to": 2.8, "easing": "ease_in_out_sine", "loop": true},
+          "warp": 0.9,
+          "count": 6,
+          "colors": [[0.0, 0.0, 0.0], [0.25, 0.55, 0.85], [0.85, 0.95, 1.0]]
+        }
+      },
+      {
+        "type": "grain",
+        "blend": "add",
+        "opacity": 1.0,
+        "params": {"detail": 0.02}
+      }
+    ]
+  }
+}

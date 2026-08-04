@@ -1,0 +1,32 @@
+# Vendored upstream source. Rebuild with `make ffmpeg`.
+/ffmpeg/
+/.ffmpeg-build/
+
+# Content-addressed compile cache.
+/.cache/
+
+# Compiled CLIs. bin/ deliberately mixes source and build output: bin/ppmr is a
+# checked-in shell script, while these three are produced by `make` from src/.
+# Listed explicitly rather than ignoring bin/ wholesale so ppmr stays tracked.
+/bin/ppm-video
+/bin/ppm-media
+/bin/ppm-prompt
+
+# Render output.
+/out/
+*.mp4
+*.mov
+*.mkv
+*.gif
+*.ppm
+*.png
+*.jpg
+*.jpeg
+
+# Samples
+input_samples
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+compile_commands.json

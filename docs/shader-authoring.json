@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shader authoring guide",
+  "purpose": "How to write a shader for this renderer: the API contract, the idioms worth knowing, the CPU-specific differences from GLSL, and the mistakes that actually happen. Written to be usable both by a person and as context for a shader-generating model.",
+  "credits": "The antialiasing hierarchy and several accumulation/tonemapping idioms are drawn from the shader tutorials of XorDev (@Xor) at fragcoord.xyz, in particular the articles on analytic antialiasing and on reading mathematical notation. The techniques are restated here in the terms this CPU renderer needs; the original articles are the better read for the GPU context.",
+
+  "contract": {
+    "entry_point": "vec4 mainImage(vec2 FC, const Uniforms &u)",
+    "returns": "Linear RGB in [0,1]. Alpha is ignored -- PPM has no alpha channel. Out-of-range values are clamped, not wrapped.",
+    "purity": "mainImage MUST be a pure function of (FC, u). No mutable globals, no statics, no rand(), no I/O, no clock. The renderer calls it from several threads at once and may call it repeatedly for the same pixel when supersampling.",
+    "minimal_shader": "#define SHADER_NAME \"demo\"\n#include \"ppmshader.hpp\"\n\nvec4 mainImage(vec2 FC, const Uniforms &u) {\n    vec2 p = (FC * 2.0f - u.resolution) / u.resolution.y;\n    return vec4(0.5f + 0.5f * cos(u.phase * TAU + vec3(p.x, p.y, 1.0f)), 1.0f);\n}",
+    "uniforms": {
+      "resolution": "vec2, frame size in pixels",
+      "time": "float, seconds since frame 0 (frame / fps)",
+      "phase": "float, loop position in [0,1). USE THIS for anything that should loop.",
+      "aspect": "float, width / height",
+      "frame": "int, 0-based index",
+      "frames": "int, total frames in the render",
+      "fps": "float"
+    },
+    "parameters": {
+      "how": "static Param name{\"name\", default, \"description\"};",
+      "use": "The object converts implicitly to float, so use it directly in arithmetic.",
+      "effect": "Settable with --set name=value, and listed automatically in --help.",
+      "guidance": "Expose any constant somebody might reasonably want to sweep. It costs one line and makes the shader explorable without recompiling."
+    }
+  },
+
+  "porting_from_glsl": {
+    "summary": "pgl.hpp is deliberately close to GLSL ES 3.0, so most shaders port with two mechanical edits.",
+    "required_edits": [
+      {
+        "what": "Swizzles need parentheses",
+        "from": "v.xyyx",
+        "to": "v.xyyx()",
+        "why": "C++ has no property syntax. Every swizzle up to four components is generated for every vector type, so any combination you write will exist -- including rgba forms like .rgb and .bgra."
+      },
+      {
+        "what": "Declare variables with types",
+        "from": "vec2 p=..., l, i;",
+        "to": "same, but C++ requires each to be constructible; vec2 default-constructs to (0,0) as GLSL does for locals in practice",
+        "why": "GLSL golf often relies on chained comma declarations, which C++ accepts unchanged."
+      }
+    ],
+    "not_available": [
+      {
+        "name": "dFdx, dFdy, fwidth",
+        "reason": "A GPU shades 2x2 fragment quads in lockstep and takes differences between neighbours. A scalar CPU kernel evaluates one point at a time and has no neighbours, so screen-space derivatives are not merely slow, they are undefined.",
+        "replacement": "grad_fd() / fwidth_fd() in aa.hpp compute the same quantity by finite differences, which costs 2 extra evaluations of the field. Or sidestep it entirely with --samples."
+      },
+      {
+        "name": "texture(), sampler2D",
+        "reason": "No texture units. There is no image loading in the render path.",
+        "replacement": "Procedural functions: pnoise.hpp for noise, or evaluate a pattern analytically."
+      },
+      {
+        "name": "gl_FragCoord",
+        "replacement": "The FC argument. Same convention: pixel centres at +0.5, origin bottom-left."
+      },
+      {
+        "name": "discard",
+        "replacement": "Return a colour. There is no depth or blend stage to discard from."
+      }
+    ],
+    "semantic_differences": [
+      "mod(x,y) here matches GLSL (floor-based, so mod(-1.5,1.0) == 0.5), NOT fmod (truncation-based, which gives -0.5). Mixing them up produces a seam at every negative tile boundary.",
+      "normalize(vec(0)) returns zero rather than being undefined, which keeps NaNs out of the framebuffer.",
+      "mat2(a,b,c,d) is column-major as in GLSL: column 0 is (a,b). rot(angle) is provided for the common case so the convention does not have to be re-derived.",
+      "Scalar calls to names shared with <cmath> (abs, sin, sqrt, pow, ...) resolve to the standard library, not to pgl. Behaviour is identical; this is done to avoid an overload ambiguity that would otherwise break every shader that calls abs() on a float."
+    ]
+  },
+
+  "antialiasing": {
+    "framing": "On a GPU, antialiasing is a cost problem: supersampling is usually unaffordable, so analytic methods dominate. On a CPU with no frame deadline the calculus inverts -- supersampling is simply slower, and slower is acceptable. Choose in this order.",
+    "levels": [
+      {
+        "level": 1,
+        "name": "Supersampling",
+        "how": "--samples N evaluates an NxN grid inside each pixel and averages.",
+        "cost": "N^2 times the shading work.",
+        "handles": "Everything, including discontinuous functions that break every derivative-based method.",
+        "requires_from_shader": "Nothing at all.",
+        "when": "The default answer. Reach for it first, and only optimise to level 2 or 3 if the render is too slow.",
+        "note": "Because mainImage is pure, this needs no cooperation from the shader. It is the main practical payoff of the purity requirement."
+      },
+      {
+        "level": 2,
+        "name": "Analytic coverage from a distance field",
+        "how": "aa_sdf(d_inside, texel) == sat(d_inside / texel + 0.5)",
+        "cost": "One clamp. Effectively free.",
+        "handles": "Any true signed distance field: circles, boxes, segments, polygons, and unions of them.",
+        "why_the_half": "Coverage must be 0.5 when the edge crosses the pixel centre, and reach 1.0 half a pixel further in. The +0.5 offset is what makes the ramp correct rather than merely smooth.",
+        "texel": "The size of one pixel in the same units as the distance. For the standard centered_aspect coordinates use texel_from_height(u.resolution.y), which is 2/height.",
+        "sign_convention": "All aa_* helpers take INSIDE-POSITIVE values. A conventional SDF is outside-positive, so negate: aa_sdf(-d, texel).",
+        "when": "Always, for geometry you have an SDF for. Gets 1-sample renders that look supersampled."
+      },
+      {
+        "level": 3,
+        "name": "Gradient-normalised coverage",
+        "how": "aa_grad(d_inside, dxy), with dxy from grad_fd(field, p, texel)",
+        "cost": "2 extra evaluations of the scalar field.",
+        "handles": "Fields that are continuous but not true distance fields -- thresholded noise, warped SDFs, arbitrary smooth functions -- where the slope varies from place to place.",
+        "why": "With a single fixed texel, a steep region gets a razor edge and a flat region gets a mushy one. Dividing by the local gradient magnitude makes edge thickness uniform.",
+        "guard": "A zero gradient means a flat region containing no edge; the helper substitutes a very large scale so the result resolves to a hard 0 or 1 instead of NaN.",
+        "when": "Thresholding noise, and only if --samples is too slow.",
+        "warning": "Differentiate the CONTINUOUS field, never a discontinuous wrapper. floor, fract and mod all jump, so their derivative is meaningless. If the edge comes from fract(g), take the gradient of g."
+      }
+    ],
+    "discontinuity_workarounds": [
+      "A checkerboard from a step on floor() has no usable gradient. sin(x*PI)*sin(y*PI) is a continuous function with the same sign pattern and does.",
+      "For repeated bands, compute the gradient on the underlying monotonic coordinate, then apply fract() only to locate the edge.",
+      "When neither works, use --samples. It is the method with no preconditions."
+    ]
+  },
+
+  "idioms": {
+    "note": "Patterns worth internalising. Several come from XorDev's compact shader style, which is unusually dense but built from a small number of reusable moves.",
+    "items": [
+      {
+        "name": "Aspect-correct centered coordinates",
+        "code": "vec2 p = (FC * 2.0f - u.resolution) / u.resolution.y;",
+        "what": "Origin at centre, y spanning [-1,1], x extending with aspect.",
+        "why": "Dividing by resolution.y rather than resolution is what keeps the image from stretching when the aspect changes. This is the most common single mistake in ported shaders."
+      },
+      {
+        "name": "tanh tonemapping",
+        "code": "col = tanh(col * exposure);",
+        "what": "Compresses an unbounded value into [0,1) with a smooth shoulder.",
+        "why": "Accumulation loops produce arbitrarily large values. A clamp flat-clips highlights to white; tanh rolls them off, which is the difference between looking rendered and looking blown out.",
+        "alternatives": "x/(1+x) is cheaper; 1-exp(-x) has a longer shoulder."
+      },
+      {
+        "name": "Per-channel phase offset for colour",
+        "code": "vec4 col = exp(brightness - p.y * vec4(-1, 1, 2, 0));",
+        "what": "Evaluate one scalar expression at three slightly different offsets to get RGB.",
+        "why": "Produces continuous, always-in-gamut colour with no palette, no table and no interpolation seams. The offsets set the hue relationship."
+      },
+      {
+        "name": "Cosine palette",
+        "code": "vec3 col = bias + amp * cos(TAU * (freq * t + phase));",
+        "what": "Three phase-shifted cosines as a colour ramp.",
+        "why": "Smooth, cyclic, cheap, and tunable with twelve numbers. See design-tokens.json for a set of tuned presets."
+      },
+      {
+        "name": "Turbulence by iterative domain warping",
+        "code": "for (int i = 1; i <= n; ++i) v += cos(v.yx() * (float)i + t) / (float)i;",
+        "what": "Repeatedly displace the sample point by a function of itself, with amplitude falling as 1/i.",
+        "why": "The 1/i falloff is what makes the result read as fractal detail rather than noise. Swizzling (v.yx()) couples the axes so the warp curls instead of shearing."
+      },
+      {
+        "name": "Accumulate then normalise",
+        "code": "vec4 acc; for (...) acc += contribution; col = tanh(gain / acc);",
+        "what": "Sum many cheap contributions, then tonemap the total.",
+        "why": "Turns a loop into soft volumetric-looking light. Dividing INTO the accumulator (gain/acc) rather than by it inverts the field, which is how thin bright filaments arise from a smooth sum."
+      },
+      {
+        "name": "Seamless loop via phase",
+        "code": "float t = u.phase * TAU;",
+        "what": "Time as an angle over exactly one turn.",
+        "why": "Guarantees the last frame joins the first, provided every frequency multiplying t is an integer. Using u.time instead makes the loop close only by coincidence."
+      },
+      {
+        "name": "Seamless looping noise",
+        "code": "loop_noise(p, u.phase, radius)",
+        "what": "Traces a circle through a higher-dimensional noise field.",
+        "why": "Scrolling noise cannot loop -- after one period the field has translated. Sampling a closed path in a higher dimension returns to the same value exactly."
+      },
+      {
+        "name": "Domain warping for structure",
+        "code": "vec2 q = vec2(fbm(p), fbm(p + vec2(5.2f, 1.3f))); f = fbm(p + q * strength);",
+        "what": "Displace the coordinates of a noise lookup by another noise lookup.",
+        "why": "The cheapest route from featureless fbm to something that reads as smoke, marble or fluid. The offsets must be large enough that the two lookups decorrelate, or the warp collapses into a diagonal smear.",
+        "extension": "Warping the warp (a second stage) produces filament structure that one stage never reaches."
+      },
+      {
+        "name": "Smooth minimum for organic unions",
+        "code": "float d = smin(d1, d2, k);",
+        "what": "Union of two distance fields with a rounded seam of width k.",
+        "why": "A plain min() leaves a visible crease. smin blends, which is what makes separate primitives read as one object."
+      },
+      {
+        "name": "Rotate with a matrix, not with angles",
+        "code": "vec2 q = rot(angle) * p;",
+        "why": "Converting to an angle with atan and back with cos/sin is both slower and a common sign that the formulation is more complicated than it needs to be."
+      }
+    ]
+  },
+
+  "mathematical_notation": {
+    "purpose": "Shader techniques are often published as mathematical notation rather than code. This is the mapping needed to read a paper or wiki page and implement it. Condensed from XorDev's article on the subject.",
+    "symbols": {
+      "bold v or v with arrow": "a vector",
+      "v with a hat": "a unit (normalised) vector",
+      "subscripts v1 v2 v3": "vector components, indexed from 1 -- not from 0 as in code",
+      "capital A in brackets": "a matrix, written row by row (GLSL constructors are column-major, so transpose when transcribing)",
+      "|x|": "abs(x)",
+      "||v||": "length(v)",
+      "a . b": "dot(a, b)",
+      "a x b": "cross(a, b), NOT scalar multiplication",
+      "ab": "scalar multiplication, simply juxtaposed",
+      "sigma": "a summation -- a for loop that accumulates",
+      "pi (capital)": "a product -- a for loop that multiplies",
+      "superscript": "pow()",
+      "f with superscript -1": "the inverse function, not a reciprocal",
+      "x with barred arrow to expression": "an inline function definition",
+      "equivalence sign": "== ",
+      "xor symbol": "exclusive or"
+    },
+    "number_sets": {
+      "N": "natural numbers, positive integers",
+      "Z": "integers, maps to int",
+      "Q": "rationals; float approximates these",
+      "R": "real numbers; float approximates these too, and this is the set most shader maths lives in",
+      "C": "complex numbers -- no native support. Represent as a vec2 and implement the arithmetic by hand. Relevant for Mandelbrot-style iteration and quaternions."
+    },
+    "intervals": {
+      "[a, b]": "closed, endpoints included",
+      "(a, b)": "open, endpoints excluded",
+      "[0, 1)": "includes 0, excludes 1 -- the range of fract(), and the reason u.phase is defined this way"
+    },
+    "practical_note": "Watch for 1-based indexing and for row-major matrix layout. Both silently produce plausible but wrong output when transcribed literally into GLSL-style code."
+  },
+
+  "performance": {
+    "measure_first": "Render 10 frames at 480x270 and scale up. Cost is linear in width * height * frames * samples^2 and very predictable.",
+    "notes": [
+      "Threading is automatic and row-striped; expect close to linear scaling with cores. Verify with a CPU utilisation figure well above 100%.",
+      "Supersampling is the most expensive knob by far, being quadratic. Halve it before halving resolution.",
+      "Trig is the usual hot spot. sin/cos are far more expensive than multiply-add; a polynomial approximation is often adequate for a warp field.",
+      "Prefer dot(v,v) to length(v) when only comparing magnitudes -- it avoids a square root.",
+      "Deep loops are fine here. There is no warp divergence, so a per-pixel early exit genuinely saves time, unlike on a GPU.",
+      "Compile with -O3. Autovectorisation across the component-wise operations in pgl.hpp is a large part of the achieved throughput."
+    ]
+  },
+
+  "pitfalls": [
+    {"symptom": "Image is vertically mirrored", "cause": "PPM rows are top-down and GLSL's origin is bottom-left.", "fix": "The runtime flips by default. If a shader was authored against top-down coordinates, pass --top-left-origin."},
+    {"symptom": "Dark speckles in bright areas", "cause": "Unclamped float-to-byte conversion wrapping modulo 256.", "fix": "Already handled by the runtime's to_byte(). If it appears, the shader is returning NaN, not just a large value."},
+    {"symptom": "Whole frame is black or grey", "cause": "NaN propagating from a division by zero, normalize(0), sqrt of a negative, or pow of a negative base.", "fix": "Guard the divisor. Note that NaN fails every comparison, so a clamp does not remove it."},
+    {"symptom": "Loop visibly jumps at the wrap", "cause": "Animation driven by u.time, or by a non-integer multiple of u.phase.", "fix": "Use u.phase * TAU and integer frequencies only."},
+    {"symptom": "Aliasing that --samples does not fix", "cause": "Detail finer than the sample grid, e.g. a noise frequency far above the pixel rate.", "fix": "Band-limit the field: reduce frequency, or drop octaves whose period is below a pixel."},
+    {"symptom": "Image stretches when resolution changes", "cause": "Dividing by resolution instead of resolution.y.", "fix": "p = (FC * 2 - resolution) / resolution.y"},
+    {"symptom": "Seam at negative coordinates in a tiled pattern", "cause": "fmod instead of GLSL mod.", "fix": "Use mod() from pgl.hpp, which is floor-based."},
+    {"symptom": "'call to abs is ambiguous' at compile time", "cause": "A scalar overload clashing with the standard library.", "fix": "Should not occur -- pgl.hpp omits the colliding float overloads deliberately. If it appears for a new function, that function needs the same treatment."},
+    {"symptom": "ffmpeg reports invalid data on a pipe", "cause": "Missing -f ppm_pipe, or a partially written frame.", "fix": "Always pass -f ppm_pipe explicitly when reading stdin."},
+    {"symptom": "Output has more frames than rendered", "cause": "-r after -i instead of -framerate before it.", "fix": "See ppm-ffmpeg.json; this duplicates frames and lengthens the video."}
+  ]
+}

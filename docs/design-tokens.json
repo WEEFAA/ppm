@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Design tokens",
+  "purpose": "Named, reusable values for renders and shaders, so independently produced output still looks like it came from one system. These are defaults and suggested ranges, not hard requirements -- every one is meant to be overridden when a piece calls for it.",
+  "usage_note": "Tokens are advisory. A shader that ignores every palette here is fine if it looks good; the point is that a shader which does not care gets a coherent default instead of an arbitrary one.",
+
+  "render_presets": {
+    "thumb":  {"size": "480x270",   "fps": 30, "frames": 60,  "samples": 1, "use": "fast iteration; roughly 1/16 the cost of 1080p"},
+    "draft":  {"size": "960x540",   "fps": 30, "frames": 120, "samples": 1, "use": "checking motion and timing"},
+    "sd":     {"size": "1280x720",  "fps": 60, "frames": 240, "samples": 2, "use": "default deliverable"},
+    "hd":     {"size": "1920x1080", "fps": 60, "frames": 360, "samples": 2, "use": "final deliverable"},
+    "square": {"size": "1080x1080", "fps": 30, "frames": 180, "samples": 2, "use": "social"},
+    "vertical": {"size": "1080x1920", "fps": 30, "frames": 180, "samples": 2, "use": "social, portrait"},
+    "uhd":    {"size": "3840x2160", "fps": 60, "frames": 360, "samples": 2, "use": "expensive; supersampling matters less as resolution rises"},
+    "still":  {"size": "2000x2000", "fps": 1,  "frames": 1,   "samples": 4, "use": "print or poster; supersampling is cheap for one frame"}
+  },
+
+  "cost_model": {
+    "note": "Shading cost scales as width * height * frames * samples^2. Use this to predict a render before starting it.",
+    "samples_guidance": {
+      "1": "Correct for shaders whose edges are analytically antialiased. Always try this first.",
+      "2": "4x cost. Removes most visible aliasing in noise and thin features. The usual choice for delivery.",
+      "3": "9x cost. Diminishing returns except on high-contrast thin lines.",
+      "4": "16x cost. Stills only."
+    }
+  },
+
+  "timing": {
+    "loop_rule": "Drive animation from u.phase in [0,1), scaled by TAU. Every frequency multiplying phase must be an integer or the loop will not close.",
+    "durations_seconds": {"micro": 1.0, "short": 2.0, "standard": 4.0, "long": 8.0, "ambient": 16.0},
+    "easing": {
+      "note": "Easings for a value in [0,1]. Linear motion reads as mechanical; almost everything benefits from at least smoothstep.",
+      "linear": "t",
+      "smoothstep": "t*t*(3-2t)",
+      "smootherstep": "t*t*t*(t*(6t-15)+10)",
+      "ease_in_quad": "t*t",
+      "ease_out_quad": "1-(1-t)*(1-t)",
+      "ease_in_out_sine": "0.5-0.5*cos(PI*t)",
+      "pulse": "0.5-0.5*cos(TAU*t)",
+      "breathe": "0.5+0.5*sin(TAU*t)"
+    }
+  },
+
+  "palettes": {
+    "note": "Cosine palettes, evaluated as col = bias + amp * cos(TAU * (freq * t + phase)) for t in [0,1]. They are always in gamut, need no table, and have no interpolation seams. Tune by editing four vec3s.",
+    "cosine": {
+      "ember":     {"bias": [0.5, 0.35, 0.25], "amp": [0.5, 0.35, 0.25], "freq": [1.0, 1.0, 1.0], "phase": [0.00, 0.15, 0.25], "mood": "warm, fire, rust"},
+      "ice":       {"bias": [0.4, 0.5, 0.6],   "amp": [0.3, 0.35, 0.4],  "freq": [1.0, 1.0, 1.0], "phase": [0.55, 0.6, 0.7],   "mood": "cold, clinical"},
+      "spectral":  {"bias": [0.5, 0.45, 0.55], "amp": [0.5, 0.45, 0.5],  "freq": [1.0, 1.0, 1.0], "phase": [0.00, 0.25, 0.55], "mood": "full-hue, high energy"},
+      "sunset":    {"bias": [0.6, 0.4, 0.4],   "amp": [0.4, 0.3, 0.35],  "freq": [1.0, 1.0, 1.0], "phase": [0.05, 0.20, 0.45], "mood": "warm to violet"},
+      "mono_warm": {"bias": [0.5, 0.45, 0.4],  "amp": [0.45, 0.42, 0.4], "freq": [1.0, 1.0, 1.0], "phase": [0.0, 0.02, 0.05],  "mood": "near-greyscale, subtle warmth"},
+      "toxic":     {"bias": [0.4, 0.5, 0.35],  "amp": [0.35, 0.45, 0.3], "freq": [1.0, 1.2, 0.8], "phase": [0.30, 0.15, 0.60], "mood": "acid green, unsettling"},
+      "deep_sea":  {"bias": [0.2, 0.35, 0.45], "amp": [0.2, 0.3, 0.4],   "freq": [1.0, 1.0, 1.0], "phase": [0.60, 0.65, 0.75], "mood": "dark, submerged"}
+    },
+    "accents": {
+      "note": "Literal sRGB triples for the rare case where a specific colour is wanted, e.g. a UI-like element inside a render.",
+      "ink":       [0.02, 0.02, 0.04],
+      "paper":     [0.96, 0.95, 0.92],
+      "signal":    [1.00, 0.35, 0.20],
+      "mint":      [0.10, 0.90, 0.70],
+      "azure":     [0.25, 0.60, 1.00],
+      "amber":     [1.00, 0.70, 0.20],
+      "magenta":   [0.95, 0.25, 0.65]
+    }
+  },
+
+  "tone": {
+    "black_floor": {"value": 0.02, "range": [0.0, 0.05], "why": "keeps shadows from reading as holes and makes banding visible enough to fix"},
+    "white_rolloff": {"method": "tanh", "alternatives": ["x/(1+x)", "1-exp(-x)"], "why": "compresses unbounded accumulation into [0,1) without a hard clip"},
+    "exposure": {"default": 1.0, "range": [0.25, 8.0], "why": "the single most useful knob to expose; multiply before the tonemap"},
+    "contrast": {"default": 1.0, "range": [0.5, 2.0], "formula": "sat((x - 0.5) * contrast + 0.5)"},
+    "vignette": {"default": 0.35, "range": [0.0, 0.8], "formula": "col * (1 - amount * dot(p, p))"},
+    "gamma_note": "Output bytes are written with no gamma conversion, matching GLSL and Shadertoy. Values are treated as already display-referred. If a shader does physically-based lighting in linear space, apply pow(col, 1/2.2) itself."
+  },
+
+  "geometry": {
+    "coordinate_systems": {
+      "centered_aspect": {
+        "formula": "p = (FC * 2 - resolution) / resolution.y",
+        "range": "y in [-1,1], x in [-aspect, aspect]",
+        "default": true,
+        "why": "resolution-independent and the convention almost all shader code assumes"
+      },
+      "uv_01": {"formula": "uv = FC / resolution", "range": "[0,1] both axes", "why": "texture-style addressing; stretches with aspect"},
+      "pixel": {"formula": "FC", "why": "when a size must be exact in pixels, e.g. a 1px line"}
+    },
+    "origin": "FC has its origin at the BOTTOM-left with pixel centres at +0.5, matching GLSL. PPM rows are written top-down, so the runtime flips. --top-left-origin disables the flip.",
+    "line_widths_in_p_units": {"hairline": 0.002, "thin": 0.004, "regular": 0.008, "bold": 0.016, "note": "one pixel is 2/resolution.y in centered_aspect units; use texel_from_height()"}
+  },
+
+  "noise": {
+    "frequency": {"broad": 1.0, "default": 2.4, "detailed": 6.0, "fine": 16.0, "note": "in centered_aspect units; frequency is cycles across the half-height"},
+    "octaves": {"cheap": 3, "default": 5, "rich": 8, "note": "cost is linear; the CPU can afford more than a GPU"},
+    "lacunarity": {"default": 2.0, "range": [1.7, 2.5], "note": "exactly 2.0 can produce faint axis-aligned alignment; 1.93 avoids it"},
+    "gain": {"default": 0.5, "range": [0.35, 0.65]},
+    "warp_strength": {"subtle": 0.2, "default": 0.85, "extreme": 2.0, "note": "domain warping is the cheapest route from bland fbm to something structural"},
+    "loop_radius": {"default": 0.9, "range": [0.2, 2.0], "note": "how far the field travels around its circular loop path; larger means more change per loop"}
+  },
+
+  "encoding": {
+    "bits_per_pixel_per_second": {"default": 0.08, "high_quality": 0.15, "note": "synthetic gradients compress much better than camera footage"},
+    "containers": {
+      "mp4": {"codec": "h264", "pix_fmt": "yuv420p", "use": "delivery and playback"},
+      "mkv": {"codec": "ffv1", "pix_fmt": "rgb24", "use": "lossless intermediate for regrading"},
+      "gif": {"use": "short loops; requires a palettegen stage"},
+      "png": {"use": "stills; needs an ffmpeg built with zlib"},
+      "ppm": {"use": "raw stream passthrough for inspection or a custom encoder"}
+    }
+  }
+}
