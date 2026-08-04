@@ -1,0 +1,232 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Frame metadata vocabulary",
+  "purpose": "The terms used to describe a frame, what each one means, and how it is measured. Written so that the metadata reads to an animator, compositor or colour designer as the thing they already know, rather than as a dump of statistics.",
+  "contract": {
+    "pure_observer": "Nothing in metadata.json affects rendering, fidelity, or any parameter that synthesis reads. It can be regenerated, ignored, or deleted without changing a single output pixel.",
+    "why_separate_file": "parameters.json is the renderable scene and must stay readable. Metadata is an order of magnitude larger and serves a different reader, so it lives in metadata.json.",
+    "always_generated": "Metadata is produced on every run. It costs one extra pass over pixels that were already decoded, and a frame without it cannot be inspected later.",
+    "two_rules": [
+      "Use the real vocabulary. `hold`, `on twos`, `key`, `smear`, `low-key`, `notan`, `aerial perspective` are the terms the work is actually discussed in. A field named after its implementation is useless to the person inspecting the frame.",
+      "Never fabricate certainty. Every classification is derived from a stated measurement, and the measurement is emitted next to the label. Where the signal is too weak, the label is `undetermined` -- which is information, not a failure."
+    ]
+  },
+  "glossary": {
+    "animation_timing": {
+      "hold": "A frame exposed LONGER THAN THE MODAL STEP. Relative to the sequence's own exposure, not to one tick: on material animated uniformly on twos every frame exceeds one tick, so the absolute definition reports ~100% holds and reads as though nothing moves.",
+      "on ones / twos / threes": "Exposure rate: how many ticks each drawing is held for. Read from the CONTAINER's per-frame durations when available (see delegated_measurements), not inferred from pixels. Reported as `step`, `step_label`, and a full `exposure.distribution`.",
+      "effective_fps": "The rate at which the image actually changes, i.e. fps divided by step. Null when it cannot be determined.",
+      "key": "A drawing at an extreme of the action, from which inbetweens are derived. Reported as `key_candidate` -- where a key would plausibly sit, not a claim that one was drawn there.",
+      "inbetween": "A frame interpolating between keys. Not classified here.",
+      "smear": "A frame deliberately distorted or blurred to sell fast motion. Detected as fast movement coinciding with a drop in fine detail relative to neighbouring frames."
+    },
+    "shot_and_camera": {
+      "shot": "A run of frames between cuts. Frames carry `shot.index`, position within the shot, and shot length.",
+      "cut": "A hard change of image between adjacent frames.",
+      "fade": "A gradual transition to or from black.",
+      "dissolve": "A cross-fade between two shots. NOT currently classified.",
+      "pan": "Horizontal camera rotation. `pan_left` / `pan_right`.",
+      "tilt": "Vertical camera rotation. `tilt_up` / `tilt_down`.",
+      "push_in / pull_out": "Camera moving toward or away from the subject. Detected from radial flow (divergence), so a zoom and a dolly are not distinguished.",
+      "compound": "Movement on both axes at once.",
+      "static": "No measurable movement.",
+      "undetermined": "The frame carries too little texture for the block search to lock onto anything. Different from static: static means measured as still, undetermined means not measurable."
+    },
+    "exposure_and_value": {
+      "low_key / mid_key / high_key": "Where the bulk of the tones sit, from the median luma. Low-key is predominantly dark, high-key predominantly light.",
+      "contrast_ratio": "Ratio of the 95th to the 5th percentile luma, the way a lighting setup is described. Reported as invalid when the black floor is at or near zero, because the ratio is then unbounded rather than large.",
+      "clipped_highlights": "Fraction of pixels in the top histogram bin. Detail lost to overexposure.",
+      "crushed_blacks": "Fraction in the bottom bin. Detail lost to underexposure.",
+      "notan": "The light/dark massing of a composition, considered as shapes rather than as detail. Reported as `dark_dominant`, `balanced`, or `light_dominant` from the fraction of the frame below mid-luma.",
+      "flat": "Flagged when overall contrast is very low."
+    },
+    "colour": {
+      "harmony": "The relationship among the dominant hues: `monochromatic`, `analogous`, `split_complementary`, `triadic`, `complementary`, or `achromatic`. Classified from the largest angular distance between palette hues.",
+      "palette": "A small ordered set of weighted colours, extracted by median cut and merged for near-duplicates.",
+      "palette_separation": "Mean luma-weighted distance between palette entries. Low separation is what turns a muted palette muddy.",
+      "temperature": "Warm / cool / neutral, from the red-minus-blue mean.",
+      "hue_spread": "0 when the whole frame shares one hue, 1 when hues are evenly distributed. Computed as the resultant length of saturation-weighted hue vectors, so unsaturated pixels do not vote.",
+      "shadow_chroma": "The saturation and hue of the darkest quartile. See colour_design_principles below -- this is the single most useful colour field here.",
+      "aerial_perspective": "Whether brighter regions carry less local contrast than darker ones, which is what atmospheric depth looks like. `present`, `flat`, or `inverted`.",
+      "murky": "Flagged when the palette is muted AND its values are not separated -- the failure mode of restrained colour."
+    },
+    "composition": {
+      "centroid": "Brightness-weighted centre of the frame. CAVEAT: this reports where the light is, not where the subject is. On a dark figure against a bright sky it points at the sky.",
+      "thirds_affinity": "How close the centroid sits to a rule-of-thirds intersection. 1 is on it.",
+      "horizon": "The strongest sustained horizontal luma boundary. Reported only when one row stands clearly above the average, so a frame with no horizon says so rather than guessing.",
+      "vignette": "Centre-to-edge luma falloff. CAVEAT: a bright subject on a dark surround scores as heavily vignetted; this measures falloff, not a lens."
+    }
+  },
+  "colour_design_principles": {
+    "source": "Drawn from the working practice of animation colour design, in particular the approach of Michiyo Yasuda, Studio Ghibli's colour designer, as described by Animation Obsessive (https://animationobsessive.substack.com/p/the-artist-who-colored-ghibli). Restated here as checkable properties; the original article is the better read for the craft context.",
+    "why_here": "Most of these principles are not aesthetic preferences but observable properties of an image. If a property can be measured, a tool can report on it, and the person inspecting a frame can decide what to do about it.",
+    "principles": [
+      {
+        "principle": "Shadows carry colour; they are not black or grey",
+        "craft": "Defaulting shadows to neutral grey or black flattens an image. Letting shadows take a hue -- often deep and comparatively saturated -- is what gives depth.",
+        "measured_as": "color.shadow_chroma.saturation and .hue, computed over the darkest luma quartile with hue weighted by saturation.",
+        "verdict": "`coloured` when shadow saturation is at least 0.12, otherwise `neutral`, with a note suggesting hue in the shadows.",
+        "note": "This is the field most likely to change what someone does next, which is why it gets a verdict rather than only a number."
+      },
+      {
+        "principle": "Restraint, but restraint needs calibration",
+        "craft": "Muted, less saturated palettes read as more believable than bright primaries. But muted colour that is not separated in value becomes murk.",
+        "measured_as": "color.saturation together with color.palette_separation.",
+        "verdict": "`murky` true when saturation is modest AND palette separation is below 0.16 -- the combination, not either alone."
+      },
+      {
+        "principle": "A sense of air",
+        "craft": "A scene reads as having atmosphere when distant, lighter areas hold less contrast and detail than near ones.",
+        "measured_as": "color.air, comparing mean local gradient in the brightest quartile against the darkest.",
+        "verdict": "`present`, `flat`, or `inverted`. Inverted -- highlights carrying more detail than shadows -- often means a flat or backlit render."
+      },
+      {
+        "principle": "A palette per work, not a standard palette",
+        "craft": "Distinctive colour comes from designing a scheme for the specific piece rather than reaching for defaults.",
+        "measured_as": "Not directly measurable. The palette and harmony fields are reported so a scheme can be compared across shots and against other work.",
+        "honesty": "There is no metric for 'distinctive'. Saying so is better than inventing one."
+      },
+      {
+        "principle": "Observation over formula",
+        "craft": "Colour decisions came from watching how light actually behaves on surfaces at distance.",
+        "measured_as": "Nothing. Recorded because it is the principle behind the others, and because it is a reminder that these metrics describe an image rather than judging it."
+      }
+    ]
+  },
+  "field_reference": {
+    "note": "Every per-frame object in metadata.json carries these groups. Values are normalised to [0,1] unless stated.",
+    "frame": "0-based index",
+    "timecode": "HH:MM:SS:FF at the sequence frame rate",
+    "shot": {
+      "index": "0-based",
+      "frame_in_shot": "int",
+      "length": "frames",
+      "position": "0..1 within the shot"
+    },
+    "timing": {
+      "hold": "bool",
+      "key_candidate": "bool",
+      "smear": "bool",
+      "step": "int, 0 = undetermined",
+      "step_label": "phrase",
+      "difference": "mean absolute inter-frame luma difference"
+    },
+    "camera": {
+      "move": "classification",
+      "confidence": "0..1",
+      "content_dx": "fraction of frame width",
+      "content_dy": "fraction of frame height",
+      "divergence": "radial flow"
+    },
+    "exposure": {
+      "key": "low_key|mid_key|high_key",
+      "contrast": "p95-p05",
+      "contrast_ratio": "p95/p05",
+      "contrast_ratio_valid": "bool",
+      "clipped_highlights": "fraction",
+      "crushed_blacks": "fraction",
+      "dynamic_range": "max-min",
+      "flags": "array"
+    },
+    "color": {
+      "harmony": "string",
+      "dominant_hue": "degrees",
+      "dominant_hue_name": "colour-wheel name",
+      "hue_spread": "0..1",
+      "temperature": "warm|cool|neutral",
+      "saturation": "0..1",
+      "colorfulness": "chroma spread",
+      "palette_separation": "0..1",
+      "shadow_chroma": "object with verdict",
+      "murky": "bool",
+      "air": "-1..1",
+      "aerial_perspective": "present|flat|inverted",
+      "notes": "array of human-readable observations"
+    },
+    "composition": {
+      "centroid": "[x,y]",
+      "thirds_affinity": "0..1",
+      "horizon_y": "0..1 or -1",
+      "has_horizon": "bool",
+      "dark_mass": "fraction below mid-luma",
+      "notan": "classification",
+      "vignette": "-1..1"
+    },
+    "landmarks": "array; see landmark_projection"
+  },
+  "sign_conventions": {
+    "camera_vs_content": "Motion is MEASURED as content displacement but REPORTED as a camera action, because that is how shots are discussed. If the camera pans left, the scene travels right, so a positive content_dx yields `pan_left`. Both the raw displacement and the camera label are emitted so the inversion is visible rather than implied.",
+    "vertical": "Frames are stored top-down, so a positive content_dy means content moved down the raster, which corresponds to the camera tilting up.",
+    "air": "Positive means darker regions hold more contrast than bright ones -- the normal direction for atmospheric depth."
+  },
+  "landmark_projection": {
+    "purpose": "Landmarks are the metadata that has a POSITION, so a UI can draw it on the frame instead of listing it in a panel.",
+    "coordinates": "All normalised to [0,1] with the origin at the top-left of the frame, so a consumer can place them at any display size without knowing the render resolution.",
+    "kinds": {
+      "point": "x, y. Used for the luma centroid.",
+      "hline": "y only. Used for the horizon.",
+      "vector": "x, y origin plus dx, dy. Used for motion. NOTE: dx/dy are exaggerated 12x, because a per-frame displacement is a few thousandths of the frame and would otherwise be invisible. The exaggeration is stated in the tooltip."
+    },
+    "fields": {
+      "kind": "point|hline|vector",
+      "id": "stable identifier for toggling",
+      "label": "short text drawn on the frame",
+      "tooltip": "longer explanation, including caveats"
+    },
+    "rule": "A landmark is emitted only when it exists. A frame with no detectable horizon has no horizon landmark, rather than one at a guessed position."
+  },
+  "inspector_ui": {
+    "emitted_by": "--inspect on ppm-video or ppm-media, writing <out>/inspect/index.html plus JPEG stills.",
+    "stills": "Pulled back out of the encoded video rather than rendered again, so the inspector shows exactly what was delivered. Costs a little fidelity to the mp4 round trip; that is the point.",
+    "layout": {
+      "rationale": "Fixed regions, so nothing moves as content changes and the eye does not have to re-find anything.",
+      "bench": "240px fixed, left. Sequence summary plus a shot list, because a sequence is navigated by shot rather than by scrolling hundreds of frames.",
+      "show_plane": "Centre, flexible. The frame with landmarks projected onto it, badges top-left for the flags that matter at a glance.",
+      "tools": "320px fixed, right, collapsible. Grouped metadata, overlay toggles, palette swatches, histogram.",
+      "navigation": "68px fixed, bottom. Scrub, play/pause, frame stepping, timecode. Transition and key-candidate ticks are marked on the scrubber so structure is visible without scrubbing to find it."
+    },
+    "interaction": {
+      "space": "play/pause",
+      "arrows or , .": "step one frame",
+      "home/end": "first/last frame",
+      "t": "toggle the tools panel",
+      "hover a landmark": "tooltip with its caveats"
+    },
+    "serving": "Browsers block fetch() from file:// pages, so the directory must be served over HTTP. The page detects this and prints the command."
+  },
+  "known_gaps": {
+    "note": "Recorded deliberately. An undocumented gap reads as a claim.",
+    "items": [
+      "Dissolves and wipes are not classified; only cuts and fades are.",
+      "A zoom and a dolly are indistinguishable from radial flow alone.",
+      "No subject or face detection, so `centroid` is a light proxy and shot framing (close-up, medium, wide) is not reported.",
+      "No light-source estimation: direction, count, and quality of light are not measured.",
+      "`key_candidate` marks where a key would plausibly sit; it does not recover an actual drawing hierarchy.",
+      "Exposure rate detection assumes a constant step; a sequence mixing ones and twos reports only the modal value.",
+      "clipped_highlights and crushed_blacks are read from the reported histogram, so they are bin-resolution estimates rather than exact pixel counts.",
+      "No audio, and therefore no sync or beat information.",
+      "Colour metrics operate on display-encoded values with a simple opponent-axis approximation, not CIELAB or CAM16."
+    ]
+  },
+  "delegated_measurements": {
+    "principle": "Where ffprobe already reads a fact out of the container, read it rather than infer it. Inference is for things that are genuinely not recorded.",
+    "exposure": {
+      "delegated_to": "ffprobe -show_entries frame=pts_time,duration_time,pict_type,key_frame -of json",
+      "why": "For variable-rate material the per-frame duration IS the timing chart. Inferring holds from pixel differences means inferring a property the decode has usually already flattened away -- reconstructing what was discarded a moment earlier.",
+      "measured_example": "A 920x1200 animation reported 239 frames at 2 ticks, 24 at 3, 5 at 1, 2 at 4, on a 120fps tick base -- i.e. on twos. The pixel inference on the same clip said 'on ones, 8% holds'.",
+      "reported": "summary.exposure_source is 'container_timing' or 'inferred_from_pixels'. When delegated, the pixel inference is kept alongside under exposure.pixel_inference with an `agrees` flag, so a disagreement is visible rather than hidden.",
+      "guard": "Durations must quantise onto the tick grid within 20% or the whole reading is rejected. A confident wrong exposure is worse than none.",
+      "json_note": "ffprobe emits pts_time and duration_time as STRINGS. A consumer accepting only JSON numbers silently reads zero. Parsed with json.hpp's as_num, which accepts either.",
+      "csv_warning": "ffprobe's -of csv emits fields in its own internal order, not the order requested, so positional parsing reads the wrong column. Use -of json."
+    },
+    "not_delegated": [
+      "essence grid and reconstruction error -- nothing in ffprobe computes these",
+      "weighted palette -- palettegen emits an image, not numbers",
+      "shadow chroma, murkiness, aerial perspective -- colour-design measurements that do not exist elsewhere",
+      "flat-region grain -- signalstats and blurdetect do not separate flat areas from edges",
+      "essence-grid motion field"
+    ],
+    "unit_mismatch_warning": "Do NOT mix ffprobe filter values into our fields. signalstats SATAVG is YUV chroma magnitude, not HSV saturation (0.682 vs our 0.013 on the same frame), and YAVG is limited-range Y. Blending them would corrupt our numbers silently.",
+    "available_cross_checks": "scdet (cuts), freezedetect (holds), blackdetect (fades) exist in the vendored build and are useful as INDEPENDENT validators of our detectors, not as replacements."
+  }
+}

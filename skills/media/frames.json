@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "The frame discipline",
+  "purpose": "How to extract, analyse, generate and parameterise frames. Frames are the primary asset of this project -- not the video, which is only a container, and not the code, which is only a means. This file is the governing document for anything that touches them.",
+
+  "premise": {
+    "statement": "A frame is an asset, not an intermediate.",
+    "consequences": [
+      "Frames are described in a form that can be inspected, diffed, edited and re-rendered, not just encoded and discarded.",
+      "Every frame is reproducible from its parameters. A render that cannot be reproduced from what was written beside it is a bug.",
+      "Frames are produced solely on CPU, so the pipeline runs anywhere -- a GPU-less VPS, a CI runner, a container.",
+      "The frame description is the interface to downstream tooling. Whatever consumes these outputs reads parameters, not pixels."
+    ]
+  },
+
+  "the_four_stages": {
+    "note": "Every tool here is some subset of these four stages, in this order. Naming them separately is what keeps the CLIs from becoming one opaque command.",
+    "extract": "Get frames out of a container, at a known size and rate.",
+    "analyse": "Measure each frame, and the relationships between frames.",
+    "derive": "Decide what the measurements imply for synthesis. Judgement, not measurement.",
+    "generate": "Rebuild frames from parameters."
+  },
+
+  "principles": [
+    {
+      "principle": "Measure before interpreting",
+      "detail": "Every derived judgement -- 'this is a cut', 'this pans left', 'this fades' -- must come from a named statistic with a stated threshold, and the statistic is reported next to the judgement so it can be disputed. A classifier that reports only its conclusion cannot be debugged.",
+      "example": "A cut is reported with the histogram distance that triggered it, so a false positive is visibly a threshold problem rather than a mystery."
+    },
+    {
+      "principle": "Separate essence from detail",
+      "detail": "A frame decomposes into a low-frequency colour field (the ESSENCE: composition, light, colour -- which carries almost all of the perceived content) and high-frequency detail (texture, grain, edges). The essence is worth storing. The detail is better regenerated than stored, because it is expensive to keep and cheap to approximate.",
+      "why_it_matters": "This split is the single fidelity dial in the whole system. Everything else follows from where it is set."
+    },
+    {
+      "principle": "Report what was discarded",
+      "detail": "Any lossy step must quantify its own loss. The essence grid reports high_freq_ratio: the mean absolute luma error between the frame and its own reconstruction. Without it, a fidelity setting is a guess; with it, the cost is a number.",
+      "rule": "Never silently truncate. If a stage drops information, say how much."
+    },
+    {
+      "principle": "Scale-invariant units",
+      "detail": "Positions normalised to [0,1]. Motion as a fraction of frame width or height. Time as a fraction of the sequence. Angles in turns.",
+      "why": "Analysis of a 480p proxy must be usable to render at 4K. Anything measured in pixels breaks that, and pixel units are also meaningless to a downstream tool that does not know the source resolution."
+    },
+    {
+      "principle": "Purity",
+      "detail": "Analysis is a pure function of the frames; synthesis is a pure function of (parameters, frame index). No wall-clock time, no rand(), no mutable global state.",
+      "why": "Purity is load-bearing rather than stylistic: it is what makes row-parallel threading lock-free, lets supersampling call the same function repeatedly, and lets a single frame be rendered without rendering its predecessors."
+    },
+    {
+      "principle": "Judge relative to context, not absolutely",
+      "detail": "Thresholds on absolute values fail on content that does not resemble the case they were tuned for.",
+      "example": "A fade to black on dark content moves mean luma by only ~0.04, so an absolute threshold of 0.08 scores a full fade as no fade. The magnitude test must scale with the observed luma range -- and that range must be measured PER SHOT, because a bright shot elsewhere in the sequence would otherwise set the bar far too high. This is why cuts are detected before fades: cuts define the shots that fades are judged within."
+    },
+    {
+      "principle": "Prefer determinism over optimality",
+      "detail": "Where two algorithms are close in quality, take the one with no random seeding.",
+      "example": "Palette extraction uses median cut rather than k-means. Median cut is slightly worse per frame but deterministic, so the palette does not flicker between adjacent frames -- and flicker is far more visible than a marginally suboptimal colour."
+    },
+    {
+      "principle": "State the sign convention",
+      "detail": "Any directional quantity must document its sign at the point of definition.",
+      "example": "Motion dx/dy are the displacement OF THE CONTENT: content moving right gives dx > 0. Block matching naturally produces the opposite (the offset at which the previous frame matches the current one), so it is negated at the point of measurement. Getting this wrong makes a synthesiser pan the wrong way, and the result looks plausible."
+    },
+    {
+      "principle": "Do the right work in the right space",
+      "detail": "Frames as decoded are display-encoded (sRGB-ish). That is the correct space for histograms and palettes, which should be perceptually spaced. It is the wrong space for averaging: the mean of sRGB 0 and 1 is not the colour half as bright, so a naive downsample drifts midtones and haloes edges. Anything that averages or interpolates converts to linear light first.",
+      "verification": "Averaging black and white must give ~0.735 in sRGB, not 0.5."
+    }
+  ],
+
+  "extract": {
+    "rule": "ffmpeg is a codec, nothing more. It decodes a container into raw PPM and encodes raw PPM into a container. No frame of the source is ever copied through to the output.",
+    "transport": "Concatenated binary P6 over a pipe. ffmpeg's pnm parser derives each frame's length from its own header, so a bare byte stream needs no container, no separators and no index.",
+    "why_pipe_not_files": "A 10-second 4K sequence is about 25 GB of uncompressed PPM. Piping makes that 0 bytes and overlaps decode, analysis and encode.",
+    "analysis_resolution": {
+      "rule": "Measure at native resolution. Cap it only to bound cost on very large sources, never as a function of the grid width.",
+      "detail": "Analysis is scale-invariant for POSITION, but not for DETAIL. Statistics about high frequencies -- edge density, grain, and above all the reconstruction error -- can only be measured against pixels that still contain those frequencies. The cap is --analysis-width (default 1920), independent of the essence grid.",
+      "history": "This was previously sized as 8x the essence width, so a 920-wide source was measured at 384 wide when the grid was 48. The reconstruction error was then computed against an already-softened proxy and understated the real loss. Deriving a measurement resolution from the thing being measured is circular; the two must be independent.",
+      "caveat": "The OUTPUT must still default to the source resolution. Silently returning a smaller video than the input because of an internal optimisation is a surprising default and was a real bug here.",
+      "disclosure": "When the cap does bite, the tool warns, because the reported error is then measured at the reduced size and is a lower bound on the true loss."
+    },
+    "decode_must_be_frame_accurate": {
+      "severity": "high",
+      "rule": "Decode with -fps_mode passthrough and time output from avg_frame_rate. See ppm-ffmpeg.json for the measurements.",
+      "lesson": "This is the sharpest illustration of the measure-before-interpreting principle. A careless decode duplicated frames to fill a nominal constant rate, and the duplicates read as held frames -- so the analysis reported the clip as animated 'on twos' with 55% holds. That statement was about our own ffmpeg invocation, not about the film. Every measurement inherits the assumptions of the step that produced its input, so the extraction stage has to be trusted before anything downstream can be."
+    },
+    "framerate_trap": {
+      "severity": "high",
+      "rule": "-framerate BEFORE -i sets the input rate. -r AFTER -i sets the output rate and resamples.",
+      "measured": "30 PPM frames through `ffmpeg -i seq -r 60 out.mp4` produced 72 frames and 1.20s, because the image demuxer defaults to 25fps and the output was then upsampled. With `-framerate 60 -i seq` it produced 30 frames and 0.50s. This was measured, not inferred, and the wrong form is the one most PPM tutorials use."
+    }
+  },
+
+  "analyse": {
+    "what_to_measure": {
+      "note": "Grouped by what each group is FOR. A measurement with no consumer should not be computed.",
+      "tone": {
+        "fields": ["luma_mean", "luma_p05", "luma_p50", "luma_p95", "luma_stddev", "contrast", "dynamic_range", "vignette"],
+        "for": "Detecting fades and dissolves, reproducing exposure, and matching black level.",
+        "note": "Prefer percentiles to min/max. A single hot pixel moves max; it does not move p95. contrast is p95 - p05 for the same reason."
+      },
+      "color": {
+        "fields": ["rgb_mean", "saturation", "colorfulness", "temperature", "palette"],
+        "for": "Reproducing the grade, and giving a downstream tool a theme to work from.",
+        "note": "colorfulness is chroma spread plus a fraction of the mean chroma offset, so a uniformly tinted frame does not score as colourful."
+      },
+      "structure": {
+        "fields": ["edge_density", "edge_p95", "high_freq_ratio"],
+        "for": "Deciding how much texture to regenerate, and whether the source is grainy enough to warrant grain at all.",
+        "note": "edge_density is the mean Sobel gradient magnitude. high_freq_ratio is the reconstruction error of the essence grid, and is the honest cost of the fidelity setting."
+      },
+      "composition": {
+        "fields": ["centroid", "vignette"],
+        "for": "Inferring camera movement for a still, and reproducing lens falloff.",
+        "caveat": "The centroid is luma-weighted, so it reports where the LIGHT is, not where the subject is. On a dark subject against a bright sky it points at the sky. Likewise `vignette` compares a central disc against a border ring, so a bright subject on a dark surround scores as heavily vignetted. Both are useful signals; neither should be described as more than it measures."
+      },
+      "motion": {
+        "fields": ["dx", "dy", "confidence", "energy", "residual", "divergence", "field"],
+        "for": "Describing camera and subject movement.",
+        "method": "Block matching on the essence grid, exhaustive within a small radius. Deliberately coarse: global camera motion is a low-frequency signal that survives downsampling intact, and sub-pixel precision on a 48-wide grid would be false precision.",
+        "confidence": "How much the best match beat the runner-up. A flat or textureless region gives near zero, which is the correct answer -- the displacement is not determinable, which is different from being zero. Consumers must weight by confidence rather than averaging raw displacements.",
+        "divergence": "Radial component of the field relative to frame centre. Consistently outward flow is a zoom in, inward is a zoom out."
+      },
+      "temporal": {
+        "fields": ["transitions", "luma_curve", "loops", "loop_error", "motion_energy_mean"],
+        "for": "Structure: where the shots are, how the sequence is shaped, whether it can loop."
+      }
+    },
+    "ordering_constraint": "Cuts must be detected before fades, because fades are judged within the shots that cuts delimit. Order of analysis stages is part of the algorithm, not an implementation detail."
+  },
+
+  "the_fidelity_dial": {
+    "parameter": "a target reconstruction ERROR, not a grid width",
+    "what_it_is": "The width of the low-frequency colour field kept per frame, preserving the source aspect ratio. Everything finer than the grid is discarded and regenerated procedurally.",
+
+    "why_error_and_not_width": {
+      "severity": "high",
+      "history": "This was originally a fixed grid width with a default of 48, and that default was wrong badly enough to make the tool look broken. On flat-shaded animation it retained 23% of the source's edge energy (0.0233 against 0.0995) and the output was unrecognisable mush.",
+      "reason": "A grid stores colour samples and has no way to express a step edge, so the width needed for a given quality depends entirely on the content. The same width that is faithful on a gradient is roughly six times too narrow for line art. No single default can serve both.",
+      "fix": "Presets name a target error. The width is then MEASURED from the actual frames: reconstruct a probe frame at increasing widths and take the first that meets the target. Error falls monotonically with width, so a linear scan suffices.",
+      "verification": "Predicted error now tracks true error closely -- 0.0377 predicted against 0.0384 measured, 0.0078 against 0.0080 -- so the number in the report is the number you get."
+    },
+
+    "presets": {
+      "draft":    {"target_error": 0.040, "detail": 0.60, "use": "fast look; visibly abstracted"},
+      "balanced": {"target_error": 0.020, "detail": 0.35, "use": "soft but recognisable"},
+      "faithful": {"target_error": 0.008, "detail": 0.12, "use": "close to the source; the default"},
+      "max":      {"target_error": 0.0,   "detail": 0.00, "use": "grid at source width; pixel-exact reconstruction"},
+      "note": "`detail` falls as fidelity rises. Injected noise exists to disguise grid softness; at high fidelity there is no softness to disguise, so adding texture absent from the source would only reduce fidelity."
+    },
+
+    "measured_example": {
+      "note": "920x1200 flat-shaded animation, frame 10. Original edge_mean 0.0995.",
+      "draft":    {"grid": "48x63",    "error": 0.0377, "edge_mean": 0.0231},
+      "balanced": {"grid": "162x211",  "error": 0.0176, "edge_mean": 0.0561},
+      "faithful": {"grid": "364x475",  "error": 0.0078, "edge_mean": 0.0852},
+      "max":      {"grid": "920x1200", "error": 0.0000, "edge_mean": 0.0995}
+    },
+
+    "measurement_must_be_at_native_resolution": {
+      "severity": "high",
+      "rule": "The error metric is only truthful when the comparison frame is at SOURCE resolution.",
+      "history": "The analysis decode used to be sized from the grid width (essence * 8), so a 920-wide source was measured at 384 wide. The grid was then compared against an already-softened proxy and the reported error understated the real loss.",
+      "fix": "Analysis resolution is now independent of the grid, capped by --analysis-width (default 1920). When the cap does bite, the tool says so, because the reported error is then measured at the reduced size."
+    },
+
+    "memory": {
+      "constraint": "A faithful grid is large. At 920x1200 a faithful grid is ~4.7 MB per frame, so holding a 270-frame sequence would cost 1.26 GB, and at source width it would cost 3.6 GB.",
+      "fix": "ppm-video runs two passes: pass 1 measures and keeps only compact per-frame statistics plus a few probe frames; pass 2 re-decodes and renders one frame at a time. Memory is flat regardless of sequence length. The cost is decoding twice.",
+      "motion_grids": "Motion estimation uses its own small fixed grid (48 wide), independent of fidelity. Camera movement is a low-frequency signal, so a coarse grid is both more robust and far cheaper, and it means the measuring pass never holds a large grid."
+    },
+
+    "measured_cost": {
+      "note": "high_freq_ratio, measured on a 640x360 procedural source. Lower is more faithful.",
+      "16": 0.0323,
+      "48": 0.0108,
+      "128": 0.0036
+    },
+    "character": {
+      "16": "heavily abstracted; colour and light only, structure barely legible",
+      "48": "recognisable, painterly; the default",
+      "128": "close to the source, slightly soft",
+      "note": "A still can afford a much higher setting than a video, because the cost is one grid rather than one per frame."
+    },
+    "content_dependence": {
+      "severity": "high",
+      "rule": "The right setting depends on the CONTENT, not on the resolution. The defaults here are tuned for continuous-tone imagery and are far too low for hard-edged graphics.",
+      "why": "The essence grid is a low-frequency representation. Continuous-tone content -- photographs, video, procedural gradients -- is mostly low-frequency, so a coarse grid captures nearly all of it. Vector art, UI, and text are almost entirely high-frequency STEP edges, which is precisely the band the grid discards, so the same setting produces soft, blocky output.",
+      "measured": {
+        "note": "high_freq_ratio on a 984x1288 screen recording of flat vector artwork, versus a procedural gradient source at the same settings.",
+        "screen_recording": {"96": 0.0323, "300": 0.0132, "700": 0.0082},
+        "procedural_gradient": {"16": 0.0323, "48": 0.0108, "128": 0.0036},
+        "reading": "The screen recording at essence 96 is as lossy as the gradient at essence 16 -- a factor of six in grid width for the same error."
+      },
+      "guidance": {
+        "rule": "Do not set a width by hand. Use --fidelity and let the width be measured; these figures are only for understanding what the presets will pick.",
+        "photographic_or_video": "typically 48-128 for a faithful target",
+        "procedural_or_gradient": "typically 32-96",
+        "vector_art_ui_or_text": "typically 350-550, and expect slight softness on the finest strokes",
+        "diagnostic": "The chosen width and the error achieved are reported on every run and written to parameters.json under \"fidelity\"."
+      },
+      "structural_note": "This is a limitation of the representation, not a tuning problem. A grid stores colour samples; it has no way to say 'there is a step edge here, at this angle'. An edge-aware essence -- storing edge position and orientation alongside the colour field -- would reconstruct hard-edged content at a fraction of the grid width. That is unimplemented."
+    },
+    "reconstruction": {
+      "upsampling": "Bicubic (Catmull-Rom), in linear light. Bilinear upsampling of a coarse grid shows diamond-shaped facets, because its first derivative jumps at cell boundaries; Catmull-Rom is C1 continuous, which is what makes a 48-wide grid read as a smooth field rather than as a grid.",
+      "overshoot": "Catmull-Rom has a negative lobe and overshoots sharp transitions. Clamp before re-encoding, or the negative value produces NaN in the transfer function.",
+      "detail_injection": "Noise standing in for the discarded band, modulated by the LOCAL GRADIENT of the essence so texture lands on edges and structure rather than across flat sky, and scaled by the MEASURED high_freq_ratio so a flat source gets no invented texture however high the setting.",
+      "edge_constraint": "Never sample outside the grid. Edge clamping turns into a visible streak along that side. When a transform pans across a grid, the zoom must be large enough to cover the pan: at zoom z the sampled window is 0.5 +- 0.5/z in uv, so staying inside needs z >= 1/(1 - 2*pan), plus a margin for the bicubic kernel's reach. This was a real visible artefact, not a theoretical one."
+    }
+  },
+
+  "parameter_vocabulary": {
+    "note": "The frame properties worth naming, so that a downstream tool has a shared language. Each entry says how it is MEASURED and how it is REPRODUCED. Anything measurable but not reproducible is marked as such -- being explicit about the gap is more useful than pretending it closes.",
+
+    "motion": {
+      "measured": "Block-matched global translation plus a coarse per-cell field, with per-cell confidence; divergence for zoom.",
+      "reproduced": "For a regenerated video, motion is already implicit in the per-frame essence grids and must NOT also be applied as a transform, or it doubles. For a still, motion is a synthesised transform: pan, zoom, rotate.",
+      "units": "fraction of frame width/height per frame; turns for rotation"
+    },
+    "transitions": {
+      "measured": "cut (histogram distance spike that is also a local maximum), fade_out / fade_in (monotonic luma run reaching near black, judged per shot). Dissolves are detectable in principle as a sustained plateau of moderate histogram distance; currently they are NOT classified.",
+      "reproduced": "Implicit in the essence sequence when regenerating. Not yet synthesisable as a directed effect.",
+      "gap": "Dissolve classification and wipe detection are unimplemented."
+    },
+    "fades": {
+      "measured": "Direction, first frame, length in frames, and strength as the luma delta.",
+      "reproduced": "An exposure or opacity animation with an easing.",
+      "note": "The magnitude test is relative to the shot's luma range; the 'reaches black' test is absolute, because black is absolute."
+    },
+    "curves": {
+      "measured": "The luma-over-time sequence is fitted against a set of standard easings and reported as the best-fitting name plus an RMSE.",
+      "reproduced": "The named easing, re-evaluated at any frame count.",
+      "why_a_name": "A name is compressible and rate-independent; sampled keyframes are neither. Verified exact on synthetic input: a generated smoothstep is identified as smoothstep with RMSE 0.",
+      "honesty": "Report the RMSE. A poor fit means the curve is not any of the candidates, and the name alone would be misleading."
+    },
+    "smoothing": {
+      "measured": "motion_energy (mean inter-frame absolute difference) and residual (what remains after motion compensation). High energy with low residual is smooth movement; high residual is change that is not translation -- a cut, a dissolve, or noise.",
+      "reproduced": "Easing choice and supersampling; temporal smoothing is not currently applied."
+    },
+    "theme": {
+      "measured": "palette (median cut, merged for near-duplicates), colorfulness, temperature, saturation.",
+      "reproduced": "Colour ramps on layers; tone.temperature and tone.saturation.",
+      "note": "The palette is the most directly reusable output for a downstream tool: a small ordered set of weighted colours is a theme."
+    },
+    "lights": {
+      "measured": "Only indirectly: the luma centroid says where the light is, vignette says how it falls off, luma_p95 says how hot the highlights are.",
+      "reproduced": "Gradient and radial layers, tone.vignette, tone.exposure.",
+      "gap": "There is no light-source estimation, no direction, and no separation of illumination from albedo. Treating the centroid as a light position is a heuristic and is documented as one."
+    },
+    "effects": {
+      "measured": "grain, from residual noise in FLAT regions only. Nothing else.",
+      "reproduced": "grain layer; blend modes; vignette.",
+      "grain_measurement": {
+        "severity": "high",
+        "history": "Grain was originally derived from edge_density, which was simply wrong. Line art has very high edge density and no noise at all, so flat-shaded animation was given the MAXIMUM grain amount. The injected noise then inflated the project's own sharpness metric from 0.0233 to 0.0743, making the reconstruction look twice as faithful as it was -- a measurement error concealing a quality error.",
+        "correct_signal": "Grain and detail are distinguished by WHERE they live. Real noise is present everywhere including flat areas; drawn or rendered detail is confined to edges. So the measurement takes the residual against a local 3x3 mean, restricted to pixels whose neighbourhood is flat (peak-to-peak luma below 0.035).",
+        "verification": "Flat cel art measures 0.00000. The same art with grain added measures 0.00895. Real animation measures 0.00056, below the 0.0015 floor, so no grain is added.",
+        "amplitude": "A measured level converts to layer amplitude at roughly 6.7x, because the layer adds (hash-0.5)*amount (mean deviation amount/4) while the local-mean residual recovers about 60% of the true deviation. Verified round trip: 0.06 in, 0.00895 measured, 0.06 recovered.",
+        "lesson": "A derived signal must be validated against content that should score ZERO, not only against content that should score high. Edge density correlated with grain on the footage it was tuned on, and inverted on the footage it was not."
+      },
+      "gap": "No blur, bloom, chromatic aberration, or lens distortion is measured or reproduced. These are synthesis-only for now."
+    }
+  },
+
+  "generate": {
+    "rule": "Synthesis reads parameters, never code. Nothing generated by a model is compiled or executed.",
+    "why": "A bad generation becomes a rejected JSON file rather than a running program. It also makes an analysis-derived scene and a model-generated scene the same kind of object, so they can be diffed, merged and re-rendered identically.",
+    "validation": "Reject at load, before allocating: non-positive dimensions, frame counts or sample counts; resolution above 80 megapixels; sample counts above 8. An unknown layer type is skipped rather than fatal, so a slightly-wrong generation still renders.",
+    "see": "docs/scene-schema.json for the format."
+  },
+
+  "output_contract": {
+    "rule": "Every tool writes the same three things into one directory, so downstream consumers need no per-tool knowledge.",
+    "layout": {
+      "parameters.json": "What was measured, what was derived, and the scene that was rendered. The authoritative record.",
+      "<name>.<ext>": "The encoded video.",
+      "frames/frameNNNN.ppm": "The generated frames, with --keep-frames.",
+      "essence/eNNNN.ppm": "The essence grids, with --keep-essence. These are the compact reusable asset."
+    },
+    "parameters_sections": {
+      "output": "resolution, frame count, rate, supersampling",
+      "layers / tone / transform / background": "the renderable scene",
+      "measured": "the statistics the derivation was based on",
+      "derived_motion": "for stills: the inferred camera move and the reasoning behind it",
+      "analysis": "the full per-frame record, at the requested detail level",
+      "provenance": "which tool, which input, which model"
+    },
+    "reproducibility": "parameters.json must be sufficient to re-render without the original input. This is what makes a render re-gradable and re-scalable rather than disposable."
+  },
+
+  "downstream_use": {
+    "intent": "Frames and their parameters are inputs to further tooling, not just deliverables.",
+    "reusable_outputs": [
+      "essence grids -- a compact, resolution-independent representation of a sequence's content, at a chosen fidelity",
+      "palette -- an ordered weighted colour theme per frame and per sequence",
+      "transitions -- shot boundaries, for cutting or restructuring",
+      "curves -- named easings, replayable at any frame rate",
+      "motion field -- coarse flow, for stabilisation or re-timing"
+    ],
+    "stability_rule": "Field names and units in parameters.json are an interface. Changing the meaning of a field without renaming it will silently corrupt anything consuming it."
+  },
+
+  "known_gaps": {
+    "note": "Recorded deliberately. An undocumented gap reads as a claim.",
+    "items": [
+      "Dissolves and wipes are not classified; only cuts and fades are.",
+      "No light-source estimation. The centroid is a proxy and nothing more.",
+      "Motion is integer-precision on the essence grid, so slow sub-grid drift reads as zero with low confidence.",
+      "No temporal smoothing of the essence sequence, so a noisy source produces a slightly shimmering reconstruction.",
+      "high_freq_ratio measures luma error only; a chroma-only loss is not counted.",
+      "The essence grid has no edge-aware term, so hard-edged content (vector art, UI, text) needs a grid roughly six times wider than continuous-tone content for the same error. See content_dependence under the_fidelity_dial.",
+      "Palette merge distance is a fixed threshold rather than adaptive.",
+      "Audio is entirely out of scope."
+    ]
+  }
+}

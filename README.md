@@ -218,6 +218,18 @@ prompt.
 Each records its *reasoning*, and each records its *known gaps* — an undocumented
 gap reads as a claim.
 
+### Skill mirrors
+
+`skills/media/` ships a portable copy of the docs the agent skill relies on:
+`frames.json`, `frame-metadata.json`, `scene-schema.json`, `design-tokens.json`,
+`shader-authoring.json`. **Keep them in sync when editing the originals.** The
+rest of `docs/` (`ppm-ffmpeg.json`, `cli-design.json`, `design-principles.json`)
+is plumbing the binaries encapsulate, so only the skill's own copy matters.
+
+```sh
+cp docs/{frames,frame-metadata,scene-schema,design-tokens,shader-authoring}.json skills/media/
+```
+
 ## Requirements
 
 - A C++17 compiler
