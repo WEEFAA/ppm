@@ -1,6 +1,6 @@
 ---
 name: ppm-cpu-frames
-description: Generate, analyse and regenerate video frames on CPU in this repo — no GPU, no graphics API. Use when working with ppm-video (video in, regenerated video out), ppm-media (image in, clip out), ppm-prompt (text in, clip out), or the CPU shader layer (ppmr); when output looks blurry or wrong; when tuning fidelity; when reading frame metadata or the inspector; or when editing analysis, synthesis or scene parameters.
+description: CPU frame generation — no GPU, no graphics API. Use when working with ppm-video, ppm-media, ppm-prompt, or ppmr; when output looks blurry or wrong; when tuning fidelity; when reading frame metadata or the inspector.
 ---
 
 # CPU frame generation
@@ -8,16 +8,23 @@ description: Generate, analyse and regenerate video frames on CPU in this repo �
 ffmpeg is used **only as a codec**. Everything between decode and encode is our own
 C++17. Frames move as concatenated binary PPM over a pipe.
 
+## Prerequisites
+
+These commands require the ppm binaries in PATH. Install them:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/aelfestijo/ppm/main/install.sh | sh
+```
+
 ## The three CLIs
 
 Each writes `parameters.json`, `metadata.json` and a video into one directory.
 
-```bash
-./bin/ppm-video clip.mov -o out/study        # measure every frame, regenerate
-./bin/ppm-media photo.jpg --duration 6       # still -> clip with an inferred move
-./bin/ppm-prompt "a slow aurora"             # model returns parameters -> render
-./bin/ppmr shaders/plasma.cpp -o out.mp4     # hand-authored CPU shader
-make && make test                            # build + end-to-end self-check
+```sh
+ppm-video  clip.mov  -o out/study        # measure every frame, regenerate
+ppm-media  photo.jpg -o out/photo --duration 6   # still -> clip with an inferred move
+ppm-prompt "a slow aurora"               # model returns parameters -> render
+ppmr shaders/plasma.cpp -o out.mp4       # hand-authored CPU shader
 ```
 
 ## Fidelity — read this before calling output "blurry"
@@ -26,7 +33,7 @@ Fidelity is a **target reconstruction error**, not a grid width. The essence gri
 stores colour samples and cannot represent a step edge, so line art needs roughly
 six times the width a gradient does. The width is measured from the content.
 
-```bash
+```sh
 -f draft      # error <= 0.040   fast, visibly abstracted
 -f balanced   # error <= 0.020   soft but recognisable
 -f faithful   # error <= 0.008   default
@@ -90,14 +97,14 @@ parentheses (`v.xyyx()`), and **`dFdx`/`dFdy`/`fwidth` do not exist** — a GPU 
 
 ## Reference — read, do not guess
 
+When working inside the ppm repository, these files define the system:
+
 - `docs/frames.json` — the frame discipline; fidelity, extraction, parameter vocabulary
 - `docs/frame-metadata.json` — metadata terms, colour-design principles, inspector contract
 - `docs/scene-schema.json` — layers, tone, transforms, animation
 - `docs/ppm-ffmpeg.json` — PPM spec and ffmpeg flags, verified against source
 - `docs/design-principles.json`, `docs/design-tokens.json`, `docs/cli-design.json`
 - `docs/shader-authoring.json` — shader API, idioms, pitfalls
-
-`include/pgl.hpp` is **generated** — edit `tools/gen_pgl.py`, run `make pgl`.
 
 ## Dependency policy
 
