@@ -19,24 +19,20 @@ command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent
 
 Do NOT generate C++ code, shaders, or frame data by hand. Use the binaries.
 
-**For video analysis/regeneration:**
-```sh
-ppm-video INPUT.mp4 -o OUTPUT_DIR -f FAIDELITY_PRESET
-```
+Pick the CLI by **input type**:
 
-**For image-to-clip:**
-```sh
-ppm-media INPUT.jpg -o OUTPUT_DIR --duration SECONDS
-```
+| Input | CLI | What it does |
+|---|---|---|
+| Video file | `ppm-video` | Measures every frame, regenerates the sequence |
+| Image file | `ppm-media` | Measures it, infers a camera move, generates a clip |
+| Text description | `ppm-prompt` | Asks a model for scene parameters, then renders |
+| C++ shader file | `ppmr` | Compiles and streams a hand-authored CPU shader |
 
-**For prompt-to-video:**
 ```sh
-ppm-prompt "DESCRIPTION" -o OUTPUT_DIR
-```
-
-**For hand-authored shaders:**
-```sh
-ppmr SHADER.cpp -o OUTPUT.mp4
+ppm-video  clip.mp4  -o out/study -f faithful
+ppm-media  photo.jpg -o out/photo --duration 6
+ppm-prompt "a slow aurora over dark water" -o out/aurora
+ppmr shaders/plasma.cpp -o out.mp4
 ```
 
 **Completion criterion:** The output directory contains `parameters.json` and a video file.
