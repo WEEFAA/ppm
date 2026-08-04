@@ -5,109 +5,98 @@ description: CPU frame generation — no GPU, no graphics API. Use when working 
 
 # CPU frame generation
 
-ffmpeg is used **only as a codec**. Everything between decode and encode is our own
-C++17. Frames move as concatenated binary PPM over a pipe.
+## Step 1: Ensure binaries are available
 
-## Prerequisites
-
-These commands require the ppm binaries in PATH. Install them:
+Run this command. If it fails or the binaries are not in PATH, run the install:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/aelfestijo/ppm/main/install.sh | sh
+command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/aelfestijo/ppm/main/install.sh | sh
 ```
 
-## The three CLIs
+**Completion criterion:** `ppm-video --help` prints usage without error.
 
-Each writes `parameters.json`, `metadata.json` and a video into one directory.
+## Step 2: Run the appropriate CLI
 
+Do NOT generate C++ code, shaders, or frame data by hand. Use the binaries.
+
+**For video analysis/regeneration:**
 ```sh
-ppm-video  clip.mov  -o out/study        # measure every frame, regenerate
-ppm-media  photo.jpg -o out/photo --duration 6   # still -> clip with an inferred move
-ppm-prompt "a slow aurora"               # model returns parameters -> render
-ppmr shaders/plasma.cpp -o out.mp4       # hand-authored CPU shader
+ppm-video INPUT.mp4 -o OUTPUT_DIR -f FAIDELITY_PRESET
 ```
 
-## Fidelity — read this before calling output "blurry"
-
-Fidelity is a **target reconstruction error**, not a grid width. The essence grid
-stores colour samples and cannot represent a step edge, so line art needs roughly
-six times the width a gradient does. The width is measured from the content.
-
+**For image-to-clip:**
 ```sh
--f draft      # error <= 0.040   fast, visibly abstracted
--f balanced   # error <= 0.020   soft but recognisable
--f faithful   # error <= 0.008   default
--f max        # exact            grid at source width; pixel-exact
+ppm-media INPUT.jpg -o OUTPUT_DIR --duration SECONDS
 ```
 
-Every run reports the chosen grid and the error achieved; both land in
-`parameters.json` under `fidelity`. If output looks soft, **read that number first**
-— it is the honest cost, and it predicts reality (0.0377 predicted / 0.0384 actual).
+**For prompt-to-video:**
+```sh
+ppm-prompt "DESCRIPTION" -o OUTPUT_DIR
+```
 
-`--essence N` overrides the preset. Prefer not to.
+**For hand-authored shaders:**
+```sh
+ppmr SHADER.cpp -o OUTPUT.mp4
+```
 
-`faithful` costs real time: the grid is ~130× more cells than `draft`, and
-`ppm-video` decodes twice. Use `-f draft --frames 30` to iterate.
+**Completion criterion:** The output directory contains `parameters.json` and a video file.
 
-## Non-obvious rules
+## Step 3: Read the output
+
+Check `parameters.json` in the output directory. It contains:
+- `fidelity.achieved_error` — the actual reconstruction error
+- `fidelity.grid_width`, `fidelity.grid_height` — the chosen grid
+- All measured parameters
+
+If output looks wrong, check `fidelity.achieved_error` first — it is the honest cost.
+
+---
+
+## Reference
+
+### Fidelity presets
+
+| Flag | Target error | Character |
+|---|---|---|
+| `-f draft` | ≤ 0.040 | fast, visibly abstracted |
+| `-f balanced` | ≤ 0.020 | soft but recognisable |
+| `-f faithful` | ≤ 0.008 | close to source (default) |
+| `-f max` | exact | pixel-exact |
+
+`faithful` costs ~130× more cells than `draft`. Use `-f draft --frames 30` to iterate.
+
+### Non-obvious rules
 
 These each cost a real bug. Do not undo them.
 
-1. **Decode with `-fps_mode passthrough`.** Otherwise ffmpeg conforms output to
-   `r_frame_rate` and *duplicates* frames — one 270-frame variable-rate `.mov`
-   decoded as 563. The duplicates read as holds, so metadata reported the clip as
-   "on twos, 55% holds" when that was our own decode command. Time output from
-   `avg_frame_rate`, never `r_frame_rate`.
-2. **Measure at native resolution.** Detail statistics — edge density, grain, the
-   reconstruction error — only exist in pixels that still contain those
-   frequencies. `--analysis-width` must stay independent of the grid width;
-   deriving one from the other is circular and understated the loss.
-3. **Grain comes from flat regions only**, never from `edge_density`. Line art has
-   high edge density and zero noise; the old signal gave clean animation maximum
-   grain, and the injected noise then inflated our own sharpness metric.
-4. **Average in linear light.** Averaging sRGB drifts midtones and haloes edges.
-   Check: black + white must average to ~0.735, not 0.5.
-5. **Motion `dx`/`dy` are content displacement**, reported as camera action.
-   Content right = `pan_left`. Block matching yields the negation, so it is negated
-   at measurement.
-6. **`mainImage` and scene synthesis must stay pure.** No statics, no `rand()`, no
-   clock. Purity is what makes threading lock-free and single-frame rendering
-   possible.
-7. **Cuts before fades.** Fade magnitude is judged per shot, and cuts define shots.
+1. **Decode with `-fps_mode passthrough`.** Otherwise ffmpeg duplicates frames.
+2. **Measure at native resolution.** `--analysis-width` must stay independent of grid width.
+3. **Grain comes from flat regions only**, never from `edge_density`.
+4. **Average in linear light.** Black + white must average to ~0.735, not 0.5.
+5. **Motion `dx`/`dy` are content displacement.** Content right = `pan_left`.
+6. **`mainImage` and scene synthesis must stay pure.** No statics, no `rand()`, no clock.
+7. **Cuts before fades.** Fade magnitude is judged per shot.
 
-## Debugging
+### Debugging
 
 | Symptom | Cause |
 |---|---|
-| Output soft / blurry | Fidelity preset too low. Check `fidelity.achieved_error`. |
+| Output soft / blurry | Fidelity too low. Check `fidelity.achieved_error`. |
 | Frame count ≈ 2× source | Missing `-fps_mode passthrough`. |
 | Plays too fast | Timed from `r_frame_rate` instead of `avg_frame_rate`. |
 | Fake film noise on clean art | Grain derived from edges, not flat regions. |
-| Whole frame black or grey | NaN. `clamp` will not remove it — NaN fails every comparison. |
-| Memory blowup on long clips | Essence grids held in RAM; `ppm-video` must stream (two passes). |
+| Whole frame black or grey | NaN. `clamp` will not remove it. |
+| Memory blowup on long clips | Essence grids held in RAM; must stream (two passes). |
 | Vertically mirrored (shaders) | Pass `--top-left-origin`. |
-| More output frames than rendered | `-r` after `-i`; use `-framerate` before it. |
 
-## Shaders
+### Shaders
 
-One C++ file, one pure function. Porting from GLSL needs two edits: swizzles take
-parentheses (`v.xyyx()`), and **`dFdx`/`dFdy`/`fwidth` do not exist** — a GPU shades
-2×2 quads and subtracts neighbours; a scalar CPU kernel has no neighbours. Use
-`--samples` (needs nothing from the shader) or the helpers in `aa.hpp`.
+One C++ file, one pure function. Porting from GLSL: swizzles take parentheses (`v.xyyx()`), `dFdx`/`dFdy`/`fwidth` do not exist — use `--samples` or helpers in `aa.hpp`.
 
-## Reference — read, do not guess
+### Reference files (when inside ppm repo)
 
-When working inside the ppm repository, these files define the system:
-
-- `docs/frames.json` — the frame discipline; fidelity, extraction, parameter vocabulary
-- `docs/frame-metadata.json` — metadata terms, colour-design principles, inspector contract
+- `docs/frames.json` — frame discipline, fidelity, parameter vocabulary
+- `docs/frame-metadata.json` — metadata terms, colour-design principles
 - `docs/scene-schema.json` — layers, tone, transforms, animation
-- `docs/ppm-ffmpeg.json` — PPM spec and ffmpeg flags, verified against source
-- `docs/design-principles.json`, `docs/design-tokens.json`, `docs/cli-design.json`
+- `docs/ppm-ffmpeg.json` — PPM spec and ffmpeg flags
 - `docs/shader-authoring.json` — shader API, idioms, pitfalls
-
-## Dependency policy
-
-ffmpeg, a C++17 compiler, the standard library. Nothing is linked but `-pthread`.
-`curl` only for `https://` model endpoints; `http://` uses raw sockets. Adding a
-dependency is a discussion, not a commit.
