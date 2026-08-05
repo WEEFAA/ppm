@@ -27,3 +27,10 @@ use them verbatim in specs, tickets, and code.
   `find_tool` lookup for one run.
 - **find_tool** — the binary-location helper (`include/pipe.hpp`) that prefers
   `exe_dir/ffmpeg`, then `./ffmpeg/`, then PATH.
+- **release tag** — a `v*` git tag pushed to trigger the release workflow; the
+  version source of truth for `make release` and for install.sh's download URL.
+- **release workflow** — the GitHub Actions pipeline that, on a release tag
+  push, runs tests, assembles the per-platform tarballs, and creates/uploads the
+  GitHub release.
+- **build matrix** — the set of runner platforms the release workflow builds for:
+  `linux-x64`, `linux-arm64`, `darwin-arm64`, `darwin-x64`.

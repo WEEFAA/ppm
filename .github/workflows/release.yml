@@ -1,0 +1,68 @@
+name: Release
+
+# Ship by pushing a release tag; merging to master alone never releases.
+#   git tag v0.1.1 && git push origin v0.1.1
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Make the release object first so the per-platform build jobs can upload to
+  # it. Idempotent: a rerun of a failed leg skips creation if it already exists.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release (if missing)
+        run: |
+          if ! gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release create "${{ github.ref_name }}" --generate-notes
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # One build per runner platform. `make release` assembles
+  # out/release/ppm-<tag>-<platform>.tar.gz for the runner it runs on, so the
+  # matrix covers every platform install.sh is asked for. Tests gate the release.
+  build:
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-14
+            platform: darwin-arm64
+          - os: macos-13
+            platform: darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git describe` sees the tag and the vendored
+          # ffmpeg pin resolves.
+          fetch-depth: 0
+
+      - name: Build vendored ffmpeg
+        run: make ffmpeg
+
+      - name: Test
+        run: make test
+
+      - name: Assemble release tarball
+        # Pin the tarball version to the pushed tag: install.sh downloads
+        # ppm-<version>-<platform>.tar.gz from releases/download/<version>, so
+        # the two must match exactly.
+        run: make release RELEASE_VERSION="${{ github.ref_name }}"
+
+      - name: Upload asset
+        run: gh release upload "${{ github.ref_name }}" out/release/ppm-*.tar.gz --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
