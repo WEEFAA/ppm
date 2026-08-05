@@ -109,7 +109,10 @@ inline bool is_dir(const std::string &p) {
     return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 inline bool is_executable(const std::string &p) {
-    return access(p.c_str(), X_OK) == 0;
+    struct stat st;
+    // A directory is searchable, not executable: access(p, X_OK) alone would
+    // accept a directory named like a tool and later fail with "is a directory".
+    return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode) && access(p.c_str(), X_OK) == 0;
 }
 
 /// mkdir -p
@@ -175,13 +178,15 @@ inline std::string find_tool(const std::string &name, const std::string &overrid
                              const std::string &exe_dir) {
     if (!override_path.empty()) return override_path;
 
-    // exe_dir is .../bin, so the repo root is one level up.
+    // exe_dir is .../bin. In the repo the vendored pair lives one level up at
+    // ../ffmpeg; in an installed tree the bundled pair lives next to the CLIs at
+    // exe_dir/ffmpeg.
     std::vector<std::string> candidates;
     if (!exe_dir.empty()) {
         candidates.push_back(join_path(join_path(exe_dir, "../ffmpeg"), name));
-        candidates.push_back(join_path(exe_dir, name));
+        candidates.push_back(join_path(join_path(exe_dir, "ffmpeg"), name));
     }
-    candidates.push_back("./ffmpeg/" + name);
+    candidates.push_back(join_path("./ffmpeg/", name));
     for (const std::string &c : candidates)
         if (is_executable(c)) return c;
 

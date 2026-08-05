@@ -19,6 +19,7 @@ set -euo pipefail
 
 readonly PROG=${0##*/}
 readonly ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
+readonly SCRIPT_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
 
 # --- exit codes ------------------------------------------------------------
 readonly EX_OK=0 EX_FAIL=1 EX_USAGE=2
@@ -120,10 +121,14 @@ done
 [[ -f $SHADER ]] || die "no such file: $SHADER"
 
 # --- resolve ffmpeg --------------------------------------------------------
-# Prefer the locally cloned and built ffmpeg: it is the version this project was
-# developed against, and it guarantees the ppm_pipe demuxer is present.
+# Prefer the bundled copy that ships next to the installed binaries: it is the
+# version this project was developed against, and it guarantees the ppm_pipe
+# demuxer is present. In an installed tree the bundled pair lives in
+# $SCRIPT_DIR/ffmpeg; in the repo it lives in $ROOT/ffmpeg.
 if [[ -z $FFMPEG_BIN ]]; then
-  if [[ -x "$ROOT/ffmpeg/ffmpeg" ]]; then
+  if [[ -x "$SCRIPT_DIR/ffmpeg/ffmpeg" ]]; then
+    FFMPEG_BIN="$SCRIPT_DIR/ffmpeg/ffmpeg"
+  elif [[ -x "$ROOT/ffmpeg/ffmpeg" ]]; then
     FFMPEG_BIN="$ROOT/ffmpeg/ffmpeg"
   elif command -v ffmpeg >/dev/null 2>&1; then
     FFMPEG_BIN=$(command -v ffmpeg)

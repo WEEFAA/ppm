@@ -13,7 +13,7 @@ SHADERS  := $(wildcard shaders/*.cpp)
 FFMPEG   := ffmpeg/ffmpeg
 NPROC    := $(shell (nproc 2>/dev/null || sysctl -n hw.ncpu) 2>/dev/null || echo 4)
 
-.PHONY: all help check shaders ffmpeg pgl clean distclean test
+.PHONY: all help check shaders ffmpeg pgl release clean distclean test
 
 all: $(BINS)
 
@@ -23,6 +23,7 @@ help:
 	@printf '  ffmpeg     clone and build the vendored ffmpeg\n'
 	@printf '  test       self-check: generate, analyse, regenerate, verify\n'
 	@printf '  check      compile every shader in shaders/\n'
+	@printf '  release    assemble the per-platform release tarball\n'
 	@printf '  pgl        regenerate include/pgl.hpp from tools/gen_pgl.py\n'
 	@printf '  clean      remove built binaries and the shader cache\n'
 	@printf '  distclean  also remove out/ and the ffmpeg build\n'
@@ -85,6 +86,33 @@ $(FFMPEG):
 	  --enable-zlib $(if $(filter Darwin,$(shell uname -s)),--enable-videotoolbox,) \
 	  && $(MAKE) -j$(NPROC)
 
+# Assemble the per-platform release tarball that install.sh downloads. The
+# layout mirrors bin/ at the top level (no bin/ prefix): install.sh unpacks it
+# straight into the install directory, where find_tool's exe_dir/ffmpeg lookup
+# and ppmr's dirname($0)/ffmpeg lookup both find the bundled pair.
+#
+# The version must match the release tag exactly (e.g. v0.1.0), because
+# install.sh builds the download URL from it. Default to the newest tag; pass
+# RELEASE_VERSION=v0.1.1 to override without tagging.
+VERSION  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo dev)
+RELEASE_VERSION ?= $(VERSION)
+
+# Same os-arch scheme as install.sh: darwin/linux, arm64/x64.
+OS   := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+ARCH := $(shell uname -m | sed -e 's/aarch64/arm64/; s/x86_64/x64/; s/amd64/x64/')
+PLATFORM := $(OS)-$(ARCH)
+
+release: all ffmpeg
+	@rm -rf out/release/bin
+	@mkdir -p out/release/bin/ffmpeg
+	@cp bin/ppm-video bin/ppm-media bin/ppm-prompt bin/ppmr out/release/bin/
+	@cp ffmpeg/ffmpeg ffmpeg/ffprobe out/release/bin/ffmpeg/
+	@mkdir -p out/release
+	@tar -czf "out/release/ppm-$(RELEASE_VERSION)-$(PLATFORM).tar.gz" -C out/release/bin .
+	@printf 'release tarball: out/release/ppm-%s-%s.tar.gz\n' "$(RELEASE_VERSION)" "$(PLATFORM)"
+	@printf 'upload with:     gh release upload %s out/release/ppm-%s-%s.tar.gz\n' \
+	  "$(RELEASE_VERSION)" "$(RELEASE_VERSION)" "$(PLATFORM)"
+
 # Move the pin to the current upstream HEAD. Deliberately a separate target: it
 # changes measured output, so it should never happen as a side effect of `make`.
 .PHONY: ffmpeg-update
@@ -116,6 +144,8 @@ test: all
 	./bin/ppm-prompt --params $$tmp/regen/parameters.json -o $$tmp/rerender --frames 4 -q; \
 	test -s $$tmp/rerender/parameters.mp4 || { echo 'FAIL: no re-render'; exit 1; }; \
 	rm -rf $$tmp; \
+	printf 'test: install-from-release\n'; \
+	sh tools/test_install.sh; \
 	printf 'test: all passed\n'
 
 check shaders:

@@ -7,10 +7,27 @@ description: CPU frame generation — no GPU, no graphics API. Use when working 
 
 ## Step 1: Ensure binaries are available
 
-Run this command. If it fails or the binaries are not in PATH, run the install:
+**First, probe for an existing ffmpeg/ffprobe pair** (matched-pair rule):
 
 ```sh
-command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/weefaa/ppm/master/install.sh | sh
+command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1
+```
+
+- **Both exist:** ask the user "Use your ffmpeg/ffprobe instead of the bundled
+  pair? [y/N]". If they accept, remember the paths (`command -v ffmpeg`,
+  `command -v ffprobe`) and pass **both** `--ffmpeg PATH --ffprobe PATH` on every
+  `ppm-video` / `ppm-media` invocation in this session — never one without the
+  other. If they decline, use the bundled pair.
+- **Either is missing:** use the bundled pair (the installer ships it). Never
+  offer a half-pair option: a system ffmpeg with a bundled ffprobe (or vice
+  versa) silently mixes decoders and makes `parameters.json` incomparable.
+
+`ppmr` also takes `--ffmpeg PATH`; use the same choice there for consistency.
+
+Then make sure the CLIs are on PATH:
+
+```sh
+command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/WEEFAA/ppm/master/install.sh | sh
 ```
 
 **Completion criterion:** `ppm-video --help` prints usage without error.
@@ -39,6 +56,10 @@ ppm-media  photo.jpg -o out/photo --duration 6
 ppm-prompt "a slow aurora over dark water" -o out/aurora
 ppmr shaders/plasma.cpp -o out.mp4
 ```
+
+If the user chose their own ffmpeg/ffprobe pair in Step 1, append
+`--ffmpeg PATH --ffprobe PATH` to the `ppm-video` / `ppm-media` commands above
+(`ppmr` takes `--ffmpeg PATH` only).
 
 **Completion criterion:** The output directory contains `parameters.json` and a video file.
 

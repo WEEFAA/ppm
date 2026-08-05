@@ -59,6 +59,7 @@ static void usage(const char *prog) {
         "      --keep-essence    also write the essence grid as PPM\n"
         "      --video-ext EXT   mp4 (default), mkv lossless, gif\n"
         "      --ffmpeg PATH     ffmpeg binary to use\n"
+        "      --ffprobe PATH    ffprobe binary to use\n"
         "  -j, --threads N       worker threads (default: all cores)\n"
         "  -q, --quiet\n"
         "  -h, --help\n"
@@ -83,7 +84,7 @@ static void usage(const char *prog) {
 int main(int argc, char **argv) {
     Log log{"ppm-media", false};
 
-    std::string input, out_dir, ffmpeg_override, video_ext = "mp4";
+    std::string input, out_dir, ffmpeg_override, ffprobe_override, video_ext = "mp4";
     std::string fidelity_name = "faithful";
     int out_w = 0, out_h = 0, frames = 120, at = 0, samples = 1, report = 1, threads = 0;
     int essence_override = 0;
@@ -119,6 +120,7 @@ int main(int argc, char **argv) {
         else if (a == "-j" || a == "--threads") threads = arg_int(log, "--threads", next());
         else if (a == "--video-ext") video_ext = next();
         else if (a == "--ffmpeg") ffmpeg_override = next();
+        else if (a == "--ffprobe") ffprobe_override = next();
         else if (a == "--no-loop") loop = false;
         else if (a == "--stylize") stylize = true;
         else if (a == "--analyze-only") analyze_only = true;
@@ -156,7 +158,7 @@ int main(int argc, char **argv) {
 
     const std::string dir = exe_dir(argv[0]);
     const std::string FFMPEG = find_tool("ffmpeg", ffmpeg_override, dir);
-    const std::string FFPROBE = find_tool("ffprobe", "", dir);
+    const std::string FFPROBE = find_tool("ffprobe", ffprobe_override, dir);
     if (FFMPEG.empty())
         log.die("no ffmpeg found. Build the vendored copy with 'make ffmpeg', or pass --ffmpeg PATH.");
 
