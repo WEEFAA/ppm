@@ -10,7 +10,7 @@ description: CPU frame generation — no GPU, no graphics API. Use when working 
 Run this command. If it fails or the binaries are not in PATH, run the install:
 
 ```sh
-command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/aelfestijo/ppm/master/install.sh | sh
+command -v ppm-video >/dev/null 2>&1 || curl -fsSL https://raw.githubusercontent.com/weefaa/ppm/master/install.sh | sh
 ```
 
 **Completion criterion:** `ppm-video --help` prints usage without error.
