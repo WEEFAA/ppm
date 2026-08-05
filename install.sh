@@ -97,8 +97,21 @@ $(manual_build)" ;;
 esac
 
 # --- install ---------------------------------------------------------------
+# The release tarball mirrors the repo layout: bin/ (the CLIs and the bundled
+# ffmpeg/ffprobe pair) plus shaders/. Binaries belong in $BIN_DIR; shaders must
+# sit one directory above it, because installed ppmr resolves its ROOT as the
+# parent of its own directory and lists shaders/ from there.
 mkdir -p "$BIN_DIR"
-tar -xzf "$tmpdir/ppm.tar.gz" -C "$BIN_DIR"
+pkgdir="$tmpdir/pkg"
+mkdir -p "$pkgdir"
+tar -xzf "$tmpdir/ppm.tar.gz" -C "$pkgdir"
+cp -R "$pkgdir/bin/." "$BIN_DIR/"
+shaders_root="$(dirname "$BIN_DIR")"
+if ! cp -R "$pkgdir/shaders" "$shaders_root/shaders" 2>"$tmpdir/shaders.err"; then
+    printf 'note: could not install shaders next to %s:\n' "$shaders_root" >&2
+    sed 's/^/  /' "$tmpdir/shaders.err" >&2
+    printf '  ppmr --list will be empty until shaders/ exists there.\n' >&2
+fi
 printf 'ppm %s installed to %s\n' "$version" "$BIN_DIR"
 
 # --- warn about PATH --------------------------------------------------------

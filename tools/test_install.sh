@@ -4,7 +4,8 @@
 # Exercises install.sh against a local HTTP server serving a fixture release
 # tarball built from the real artifacts, and asserts the release-based install
 # contract:
-#   1. binaries + the bundled ffmpeg/ffprobe pair land in the install dir,
+#   1. binaries + the bundled ffmpeg/ffprobe pair land in the install dir, and
+#      shaders land beside it (so installed ppmr --list finds them),
 #   2. git is never invoked (a stub git fails loudly if it is),
 #   3. a CLI run from the installed tree works using the bundled pair,
 #   4. --ffmpeg/--ffprobe overrides are honoured (matched pair, no silent mix),
@@ -33,12 +34,13 @@ PLATFORM="$os-$arch"
 VERSION=vTEST
 REPO=testrepo
 
-# --- fixture release tarball (real artifacts + bundled pair) ---------------
+# --- fixture release tarball (real artifacts + bundled pair + shaders) -----
 FIX="$TMP/fix"
-mkdir -p "$FIX/bin/ffmpeg"
+mkdir -p "$FIX/bin/ffmpeg" "$FIX/shaders"
 cp "$ROOT/bin/ppm-video" "$ROOT/bin/ppm-media" "$ROOT/bin/ppm-prompt" "$ROOT/bin/ppmr" "$FIX/bin/"
 cp "$ROOT/ffmpeg/ffmpeg" "$ROOT/ffmpeg/ffprobe" "$FIX/bin/ffmpeg/"
-tar -czf "$FIX/ppm-$VERSION-$PLATFORM.tar.gz" -C "$FIX/bin" .
+cp "$ROOT"/shaders/*.cpp "$FIX/shaders/"
+tar -czf "$FIX/ppm-$VERSION-$PLATFORM.tar.gz" -C "$FIX" bin shaders
 
 # --- local HTTP server -----------------------------------------------------
 mkdir -p "$FIX/$REPO/releases/download/$VERSION"
@@ -74,6 +76,9 @@ for b in ppm-video ppm-media ppm-prompt ppmr; do
 done
 [ -x "$BINDIR/ffmpeg/ffmpeg" ] || fail "bundled ffmpeg not installed"
 [ -x "$BINDIR/ffmpeg/ffprobe" ] || fail "bundled ffprobe not installed"
+[ -d "$TMP/installed/shaders" ] || fail "shaders not installed beside bin"
+[ -f "$TMP/installed/shaders/plasma.cpp" ] || fail "shipped shaders missing"
+"$BINDIR/ppmr" --list | grep -q "plasma.cpp" || fail "installed ppmr --list found no shipped shaders"
 "$BINDIR/ppm-video" --help >/dev/null || fail "ppm-video --help failed"
 if grep -q "git was invoked" "$TMP/install.log"; then
   fail "installer cloned (git was invoked)"
@@ -106,9 +111,10 @@ chmod +x "$TMP/wrap-ffmpeg" "$TMP/wrap-ffprobe"
 [ -f "$TMP/override-ffprobe.marker" ] || fail "--ffprobe override was not used"
 
 # --- 5: installed ppmr resolves the bundled ffmpeg next to itself ----------
-# The release ships bin/ only, so ppmr cannot compile a shader without headers;
-# this check proves only that its ffmpeg lookup finds the bundled pair.
-# ppmr's ROOT is one directory above bin, so headers go to <root>/include.
+# The release ships no headers (only CLIs, the bundled pair, and shaders/), so
+# ppmr cannot compile without include/; copy them in to prove an installed ppmr
+# drives a *shipped* shader through the bundled ffmpeg. ppmr's ROOT is one
+# directory above bin, so headers go to <root>/include.
 mkdir -p "$TMP/installed/include"
 cp "$ROOT"/include/*.hpp "$TMP/installed/include/"
 mv "$BINDIR/ffmpeg/ffmpeg" "$BINDIR/ffmpeg/ffmpeg.real"
@@ -120,7 +126,7 @@ echo used >> "$TMP/ppmr-ffmpeg.marker"
 exec "$BINDIR/ffmpeg/ffmpeg.real" "\$@"
 EOF
 chmod +x "$BINDIR/ffmpeg/ffmpeg"
-"$BINDIR/ppmr" "$ROOT/shaders/plasma.cpp" --size 64x36 --frames 2 --fps 5 -o "$TMP/ppmr-test.mp4" -q
+"$BINDIR/ppmr" "$TMP/installed/shaders/plasma.cpp" --size 64x36 --frames 2 --fps 5 -o "$TMP/ppmr-test.mp4" -q
 [ -f "$TMP/ppmr-ffmpeg.marker" ] || fail "installed ppmr did not use the bundled ffmpeg"
 mv "$BINDIR/ffmpeg/ffmpeg.real" "$BINDIR/ffmpeg/ffmpeg"
 

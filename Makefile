@@ -103,12 +103,12 @@ ARCH := $(shell uname -m | sed -e 's/aarch64/arm64/; s/x86_64/x64/; s/amd64/x64/
 PLATFORM := $(OS)-$(ARCH)
 
 release: all ffmpeg
-	@rm -rf out/release/bin
-	@mkdir -p out/release/bin/ffmpeg
+	@rm -rf out/release
+	@mkdir -p out/release/bin/ffmpeg out/release/shaders
 	@cp bin/ppm-video bin/ppm-media bin/ppm-prompt bin/ppmr out/release/bin/
 	@cp ffmpeg/ffmpeg ffmpeg/ffprobe out/release/bin/ffmpeg/
-	@mkdir -p out/release
-	@tar -czf "out/release/ppm-$(RELEASE_VERSION)-$(PLATFORM).tar.gz" -C out/release/bin .
+	@cp $(SHADERS) out/release/shaders/
+	@tar -czf "out/release/ppm-$(RELEASE_VERSION)-$(PLATFORM).tar.gz" -C out/release bin shaders
 	@printf 'release tarball: out/release/ppm-%s-%s.tar.gz\n' "$(RELEASE_VERSION)" "$(PLATFORM)"
 	@printf 'upload with:     gh release upload %s out/release/ppm-%s-%s.tar.gz\n' \
 	  "$(RELEASE_VERSION)" "$(RELEASE_VERSION)" "$(PLATFORM)"
