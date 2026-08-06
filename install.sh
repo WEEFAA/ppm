@@ -1,10 +1,15 @@
 #!/bin/sh
 # ppm installer: downloads pre-built binaries from a GitHub release.
 # Never clones, never builds -- the release tarball is self-contained
-# (CLIs + ppmr + the bundled ffmpeg/ffprobe pair).
+# (the CLIs + ppmr + the bundled ffmpeg/ffprobe pair + shaders/ + include/).
+#
+# Everything lands in a single ppm-owned prefix (PPM_DIR), and the CLIs are
+# made reachable by adding PPM_DIR/bin to the shell's PATH -- no symlinks, no
+# copies, and nothing ever placed in a directory we do not own.
 #
 #   curl -fsSL https://raw.githubusercontent.com/WEEFAA/ppm/master/install.sh | sh
 #   PPM_VERSION=v0.1.0 sh install.sh   # pin a specific release
+#   PPM_DIR=~/.local/share/ppm sh install.sh   # choose a different prefix
 set -eu
 
 REPO="${PPM_REPO:-WEEFAA/ppm}"
@@ -12,24 +17,19 @@ BASE_URL="${PPM_BASE_URL:-https://github.com}/$REPO"
 
 die() { echo "ppm install: $*" >&2; exit 1; }
 
-on_path() {
-    case ":$PATH:" in *":$1:"*) return 0 ;; *) return 1 ;; esac
-}
-
-pick_bin_dir() {
-    saved_ifs=$IFS; IFS=:
-    set -- ${PPM_BIN_CANDIDATES:-$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin}
-    IFS=$saved_ifs
-    fallback=$1
-    for dir; do
-        on_path "$dir" || continue
-        if [ -d "$dir" ] && [ -w "$dir" ]; then printf '%s\n' "$dir"; return; fi
-        if [ "$dir" = "$fallback" ] && [ ! -e "$dir" ]; then printf '%s\n' "$dir"; return; fi
-    done
-    printf '%s\n' "$fallback"
-}
-
-BIN_DIR="${PPM_BIN_DIR:-$(pick_bin_dir)}"
+# --- resolve the prefix ------------------------------------------------------
+# PPM_DIR holds everything ppm ships and everything ppm produces: bin/ (the
+# CLIs and the bundled ffmpeg/ffprobe pair), shaders/, include/, and the
+# compile cache .cache/. Resolution order: the PPM_DIR env variable, else
+# $XDG_DATA_HOME/ppm, else ~/.local/share/ppm. It is always under the user's
+# home, so it is always writable -- no bin-dir picker is needed.
+if [ -n "${PPM_DIR:-}" ]; then
+    PREFIX="$PPM_DIR"
+elif [ -n "${XDG_DATA_HOME:-}" ]; then
+    PREFIX="$XDG_DATA_HOME/ppm"
+else
+    PREFIX="$HOME/.local/share/ppm"
+fi
 
 # --- platform detection -----------------------------------------------------
 # Emits os-arch (darwin-arm64, linux-x64, ...) or fails for a platform with no
@@ -54,7 +54,8 @@ manual_build() {
     echo "  Build from source instead:"
     echo "    git clone https://github.com/$REPO.git ppm && cd ppm"
     echo "    make ffmpeg && make -j"
-    echo "    cp bin/* ~/.local/bin/ && cp -r bin/ffmpeg ~/.local/bin/"
+    echo "    mkdir -p '$PREFIX' && cp -R bin shaders include '$PREFIX'/"
+    echo "    export PATH=\"$PREFIX/bin:\$PATH\"   # then open a new terminal"
 }
 
 # --- resolve version --------------------------------------------------------
@@ -96,33 +97,63 @@ $(manual_build)" ;;
   $url" ;;
 esac
 
-# --- install ---------------------------------------------------------------
-# The release tarball mirrors the repo layout: bin/ (the CLIs and the bundled
-# ffmpeg/ffprobe pair) plus shaders/. Binaries belong in $BIN_DIR; shaders must
-# sit one directory above it, because installed ppmr resolves its ROOT as the
-# parent of its own directory and lists shaders/ from there.
-mkdir -p "$BIN_DIR"
-pkgdir="$tmpdir/pkg"
-mkdir -p "$pkgdir"
-tar -xzf "$tmpdir/ppm.tar.gz" -C "$pkgdir"
-cp -R "$pkgdir/bin/." "$BIN_DIR/"
-shaders_root="$(dirname "$BIN_DIR")"
-if ! cp -R "$pkgdir/shaders" "$shaders_root/shaders" 2>"$tmpdir/shaders.err"; then
-    printf 'note: could not install shaders next to %s:\n' "$shaders_root" >&2
-    sed 's/^/  /' "$tmpdir/shaders.err" >&2
-    printf '  ppmr --list will be empty until shaders/ exists there.\n' >&2
-fi
-printf 'ppm %s installed to %s\n' "$version" "$BIN_DIR"
+# --- install into the prefix ------------------------------------------------
+# The release tarball mirrors the repo layout (bin/, shaders/, include/), so
+# unpacking it at the prefix root gives exactly the tree the CLIs expect:
+#   PPM_DIR/bin/      the CLIs and the bundled ffmpeg/ffprobe pair
+#   PPM_DIR/shaders/  listed and rendered by ppmr
+#   PPM_DIR/include/  the shader API headers ppmr compiles against
+# The compile cache (.cache/) is written there too, at run time by ppmr.
+# Upgrades unpack over the old prefix; the compile cache survives because it
+# is keyed on source, so stale entries are harmless.
+mkdir -p "$PREFIX"
+tar -xzf "$tmpdir/ppm.tar.gz" -C "$PREFIX"
+printf 'ppm %s installed to %s\n' "$version" "$PREFIX"
 
-# --- warn about PATH --------------------------------------------------------
-if ! on_path "$BIN_DIR"; then
-    printf 'note: %s is not on your PATH. Add it:\n' "$BIN_DIR" >&2
+# --- reachability via PATH --------------------------------------------------
+# The CLIs are reached by PATH, not symlinks or copies: the shell rc gains a
+# marker-delimited block that prepends PPM_DIR/bin. On reinstall the block is
+# replaced, so entries never accumulate and a changed prefix leaves no stale
+# line. zsh and bash get the rc edit; every other shell gets a one-liner.
+rc=""
+case "${SHELL:-}" in
+    */zsh)  rc="$HOME/.zshrc" ;;
+    */bash) rc="$HOME/.bashrc" ;;
+esac
+
+block="# >>> ppm >>>
+export PATH=\"$PREFIX/bin:\$PATH\"
+# <<< ppm <<<"
+
+if [ -n "$rc" ]; then
+    if [ -f "$rc" ]; then
+        rest=$(sed -e '/^# >>> ppm >>>$/,/^# <<< ppm <<<$/d' "$rc")
+    else
+        rest=""
+    fi
+    if [ -n "$rest" ]; then
+        new="$rest
+$block"
+    else
+        new="$block"
+    fi
+    # Write only when the file actually changes, so a same-prefix reinstall
+    # does not touch the rc.
+    if [ ! -f "$rc" ] || [ "$(cat "$rc")" != "$new" ]; then
+        printf '%s\n' "$new" > "$rc"
+    fi
+    printf 'added %s/bin to your PATH in %s\n' "$PREFIX" "$rc"
+    printf 'open a new terminal, or run: source %s\n' "$rc"
+    printf '  export PATH="%s/bin:$PATH"\n' "$PREFIX"
+else
+    printf 'add %s/bin to your PATH:\n' "$PREFIX"
     case "${SHELL:-}" in
-        */zsh)
-            printf '  echo '\''export PATH="%s:$PATH"'\'' >> ~/.zshrc && source ~/.zshrc\n' "$BIN_DIR" >&2 ;;
+        */fish)
+            printf '  fish_add_path %s/bin\n' "$PREFIX" ;;
         *)
-            printf '  echo '\''export PATH="%s:$PATH"'\'' >> ~/.bashrc && source ~/.bashrc\n' "$BIN_DIR" >&2 ;;
+            printf '  export PATH="%s/bin:$PATH"\n' "$PREFIX" ;;
     esac
+    printf 'then open a new terminal\n'
 fi
 
 printf 'next: npx skills add https://github.com/%s --skill media\n' "$REPO"

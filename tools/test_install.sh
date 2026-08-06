@@ -3,14 +3,22 @@
 #
 # Exercises install.sh against a local HTTP server serving a fixture release
 # tarball built from the real artifacts, and asserts the release-based install
-# contract:
-#   1. binaries + the bundled ffmpeg/ffprobe pair land in the install dir, and
-#      shaders land beside it (so installed ppmr --list finds them),
-#   2. git is never invoked (a stub git fails loudly if it is),
-#   3. a CLI run from the installed tree works using the bundled pair,
-#   4. --ffmpeg/--ffprobe overrides are honoured (matched pair, no silent mix),
-#   5. installed ppmr resolves the bundled ffmpeg next to itself,
-#   6. failure paths exit nonzero with clear guidance: missing asset, and
+# contract for the dedicated-prefix layout:
+#   1. everything lands in one ppm-owned prefix (bin/ + bundled pair, shaders/,
+#      include/) and nothing ppm owns lands outside it,
+#   2. the shell rc gains exactly one marker-delimited PATH block prepending
+#      PPM_DIR/bin; a second install does not duplicate it, and a changed
+#      PPM_DIR replaces it,
+#   3. a CLI invoked by name with PPM_DIR/bin on PATH (as a fresh shell would)
+#      works: ppmr --list lists the shipped shaders, ppmr compiles a shipped
+#      shader through the shipped headers and the bundled pair, the compile
+#      cache lands inside the prefix, and a bundled-pair analysis produces
+#      output,
+#   4. a non-zsh/non-bash shell gets a printed one-liner and no rc edit,
+#   5. PPM_DIR resolution defaults are honoured (XDG_DATA_HOME/ppm, then
+#      ~/.local/share/ppm),
+#   6. git is never invoked (a stub git fails loudly if it is),
+#   7. failure paths exit nonzero with clear guidance: missing asset, and
 #      unsupported platform.
 #
 # Only external behavior is asserted: what the installer puts on disk, and what
@@ -34,13 +42,14 @@ PLATFORM="$os-$arch"
 VERSION=vTEST
 REPO=testrepo
 
-# --- fixture release tarball (real artifacts + bundled pair + shaders) -----
+# --- fixture release tarball (real artifacts + bundled pair + assets) ------
 FIX="$TMP/fix"
-mkdir -p "$FIX/bin/ffmpeg" "$FIX/shaders"
+mkdir -p "$FIX/bin/ffmpeg" "$FIX/shaders" "$FIX/include"
 cp "$ROOT/bin/ppm-video" "$ROOT/bin/ppm-media" "$ROOT/bin/ppm-prompt" "$ROOT/bin/ppmr" "$FIX/bin/"
 cp "$ROOT/ffmpeg/ffmpeg" "$ROOT/ffmpeg/ffprobe" "$FIX/bin/ffmpeg/"
 cp "$ROOT"/shaders/*.cpp "$FIX/shaders/"
-tar -czf "$FIX/ppm-$VERSION-$PLATFORM.tar.gz" -C "$FIX" bin shaders
+cp "$ROOT"/include/*.hpp "$FIX/include/"
+tar -czf "$FIX/ppm-$VERSION-$PLATFORM.tar.gz" -C "$FIX" bin shaders include
 
 # --- local HTTP server -----------------------------------------------------
 mkdir -p "$FIX/$REPO/releases/download/$VERSION"
@@ -65,74 +74,145 @@ exit 99
 EOF
 chmod +x "$STUBBIN/git"
 
-# --- 1+2: install from release, no clone -----------------------------------
-BINDIR="$TMP/installed/bin"
+# --- temp home with a fixture rc -------------------------------------------
+HOME_DIR="$TMP/home"
+mkdir -p "$HOME_DIR"
+printf '# fixture zshrc\n\nexport FOO=bar\n' > "$HOME_DIR/.zshrc"
+PREFIX="$HOME_DIR/ppm"
 BASE="http://127.0.0.1:$PORT"
-PATH="$STUBBIN:$PATH" PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" PPM_BIN_DIR="$BINDIR" \
-  sh "$ROOT/install.sh" >"$TMP/install.log" 2>&1
+
+# run_install [env assignments...] -- run install.sh with the stub git shadowing
+run_install() {
+  env PATH="$STUBBIN:$PATH" HOME="$HOME_DIR" SHELL=/usr/bin/zsh \
+    PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" \
+    "$@" sh "$ROOT/install.sh"
+}
+
+# --- 1: install from release, no clone -------------------------------------
+run_install PPM_DIR="$PREFIX" >"$TMP/install.log" 2>&1
 grep -q "installed to" "$TMP/install.log" || fail "install did not report success"
+
+# --- 1a: the prefix holds everything, nothing ppm owns lands outside it ----
 for b in ppm-video ppm-media ppm-prompt ppmr; do
-  [ -x "$BINDIR/$b" ] || fail "$b not installed"
+  [ -x "$PREFIX/bin/$b" ] || fail "$b not installed in the prefix"
 done
-[ -x "$BINDIR/ffmpeg/ffmpeg" ] || fail "bundled ffmpeg not installed"
-[ -x "$BINDIR/ffmpeg/ffprobe" ] || fail "bundled ffprobe not installed"
-[ -d "$TMP/installed/shaders" ] || fail "shaders not installed beside bin"
-[ -f "$TMP/installed/shaders/plasma.cpp" ] || fail "shipped shaders missing"
-"$BINDIR/ppmr" --list | grep -q "plasma.cpp" || fail "installed ppmr --list found no shipped shaders"
-"$BINDIR/ppm-video" --help >/dev/null || fail "ppm-video --help failed"
+[ -x "$PREFIX/bin/ffmpeg/ffmpeg" ] || fail "bundled ffmpeg not installed in the prefix"
+[ -x "$PREFIX/bin/ffmpeg/ffprobe" ] || fail "bundled ffprobe not installed in the prefix"
+[ -d "$PREFIX/shaders" ] || fail "shaders/ not installed in the prefix"
+[ -f "$PREFIX/shaders/plasma.cpp" ] || fail "shipped shaders missing"
+[ -d "$PREFIX/include" ] || fail "include/ not installed in the prefix"
+[ -f "$PREFIX/include/ppmshader.hpp" ] || fail "shipped headers missing"
+for stray in bin shaders include .cache; do
+  [ ! -e "$HOME_DIR/$stray" ] || fail "ppm asset landed outside the prefix: $HOME_DIR/$stray"
+done
+
+# --- 1b: the rc gains exactly one PATH block prepending PPM_DIR/bin ---------
+rc="$HOME_DIR/.zshrc"
+[ -f "$rc" ] || fail "installer did not touch the fixture .zshrc"
+n=$(grep -c '^# >>> ppm >>>$' "$rc" || true)
+[ "$n" -eq 1 ] || fail "expected exactly one PATH block, found $n"
+grep -q "^export PATH=\"$PREFIX/bin:\$PATH\"$" "$rc" || fail "PATH block does not prepend PPM_DIR/bin"
+grep -q "export FOO=bar" "$rc" || fail "fixture rc content was lost"
+grep -q "added .*/bin to your PATH in" "$TMP/install.log" || fail "installer did not report the rc it edited"
+grep -q "open a new terminal" "$TMP/install.log" || fail "installer did not say a new terminal is needed"
 if grep -q "git was invoked" "$TMP/install.log"; then
   fail "installer cloned (git was invoked)"
 fi
 
-# --- 3: a CLI run from the installed tree using the bundled pair -----------
+# --- 3: a CLI invoked by name, as a fresh shell would -----------------------
+PATH="$PREFIX/bin:$PATH" ppmr --list | grep -q "plasma.cpp" \
+  || fail "installed ppmr --list found no shipped shaders"
+PATH="$PREFIX/bin:$PATH" ppm-video --help >/dev/null || fail "ppm-video --help failed"
+
+# Prove the installed ppmr uses the bundled ffmpeg next to itself: wrap the
+# bundled binary so its use is recorded, then restore it.
+mv "$PREFIX/bin/ffmpeg/ffmpeg" "$PREFIX/bin/ffmpeg/ffmpeg.real"
+cat > "$PREFIX/bin/ffmpeg/ffmpeg" <<EOF
+#!/bin/sh
+echo used >> "$TMP/bundled-ffmpeg.marker"
+exec "$PREFIX/bin/ffmpeg/ffmpeg.real" "\$@"
+EOF
+chmod +x "$PREFIX/bin/ffmpeg/ffmpeg"
+
+# ppmr compiles a shipped shader through the shipped headers and the bundled
+# pair; the compile cache lands inside the prefix.
+PATH="$PREFIX/bin:$PATH" ppmr "$PREFIX/shaders/plasma.cpp" --size 64x36 --frames 2 --fps 5 \
+  -o "$TMP/ppmr-test.mp4" -q
+[ -f "$TMP/bundled-ffmpeg.marker" ] || fail "installed ppmr did not use the bundled ffmpeg"
+[ -s "$TMP/ppmr-test.mp4" ] || fail "installed ppmr render produced no output"
+[ -d "$PREFIX/.cache" ] || fail "compile cache was not written inside the prefix"
+mv "$PREFIX/bin/ffmpeg/ffmpeg.real" "$PREFIX/bin/ffmpeg/ffmpeg"
+
+# a bundled-pair analysis produces output
 "$ROOT/bin/ppmr" "$ROOT/shaders/plasma.cpp" --size 160x90 --frames 4 --fps 10 -o "$TMP/src.mp4" -q
-"$BINDIR/ppm-video" "$TMP/src.mp4" -o "$TMP/regen" --essence 24 -q
+PATH="$PREFIX/bin:$PATH" ppm-video "$TMP/src.mp4" -o "$TMP/regen" --essence 24 -q
 [ -s "$TMP/regen/parameters.json" ] || fail "bundled-pair run produced no parameters.json"
 
-# --- 4: overrides honoured (matched pair, no silent mix) -------------------
-# Wrappers record that they were invoked, then hand off to the real bundled
-# binaries. If the CLIs silently used the bundled pair instead of the override,
-# the markers would not appear.
+# --- overrides honoured (matched pair, no silent mix) ----------------------
 cat > "$TMP/wrap-ffmpeg" <<EOF
 #!/bin/sh
 echo used >> "$TMP/override-ffmpeg.marker"
-exec "$BINDIR/ffmpeg/ffmpeg" "\$@"
+exec "$PREFIX/bin/ffmpeg/ffmpeg" "\$@"
 EOF
 cat > "$TMP/wrap-ffprobe" <<EOF
 #!/bin/sh
 echo used >> "$TMP/override-ffprobe.marker"
-exec "$BINDIR/ffmpeg/ffprobe" "\$@"
+exec "$PREFIX/bin/ffmpeg/ffprobe" "\$@"
 EOF
 chmod +x "$TMP/wrap-ffmpeg" "$TMP/wrap-ffprobe"
-"$BINDIR/ppm-video" "$TMP/src.mp4" -o "$TMP/regen2" --essence 24 \
+PATH="$PREFIX/bin:$PATH" ppm-video "$TMP/src.mp4" -o "$TMP/regen2" --essence 24 \
   --ffmpeg "$TMP/wrap-ffmpeg" --ffprobe "$TMP/wrap-ffprobe" -q
 [ -s "$TMP/regen2/parameters.json" ] || fail "override run produced no parameters.json"
 [ -f "$TMP/override-ffmpeg.marker" ] || fail "--ffmpeg override was not used"
 [ -f "$TMP/override-ffprobe.marker" ] || fail "--ffprobe override was not used"
 
-# --- 5: installed ppmr resolves the bundled ffmpeg next to itself ----------
-# The release ships no headers (only CLIs, the bundled pair, and shaders/), so
-# ppmr cannot compile without include/; copy them in to prove an installed ppmr
-# drives a *shipped* shader through the bundled ffmpeg. ppmr's ROOT is one
-# directory above bin, so headers go to <root>/include.
-mkdir -p "$TMP/installed/include"
-cp "$ROOT"/include/*.hpp "$TMP/installed/include/"
-mv "$BINDIR/ffmpeg/ffmpeg" "$BINDIR/ffmpeg/ffmpeg.real"
-# The stub records that the bundled location was used, then hands off to the
-# real bundled ffmpeg so encoder detection and encoding still work.
-cat > "$BINDIR/ffmpeg/ffmpeg" <<EOF
-#!/bin/sh
-echo used >> "$TMP/ppmr-ffmpeg.marker"
-exec "$BINDIR/ffmpeg/ffmpeg.real" "\$@"
-EOF
-chmod +x "$BINDIR/ffmpeg/ffmpeg"
-"$BINDIR/ppmr" "$TMP/installed/shaders/plasma.cpp" --size 64x36 --frames 2 --fps 5 -o "$TMP/ppmr-test.mp4" -q
-[ -f "$TMP/ppmr-ffmpeg.marker" ] || fail "installed ppmr did not use the bundled ffmpeg"
-mv "$BINDIR/ffmpeg/ffmpeg.real" "$BINDIR/ffmpeg/ffmpeg"
+# --- 2: reinstall deduplicates, and a changed PPM_DIR replaces the block ----
+run_install PPM_DIR="$PREFIX" >"$TMP/install2.log" 2>&1
+n=$(grep -c '^# >>> ppm >>>$' "$rc" || true)
+[ "$n" -eq 1 ] || fail "second install duplicated the PATH block"
 
-# --- 6: failure paths ------------------------------------------------------
+PREFIX2="$HOME_DIR/ppm2"
+run_install PPM_DIR="$PREFIX2" >"$TMP/install3.log" 2>&1
+n=$(grep -c '^# >>> ppm >>>$' "$rc" || true)
+[ "$n" -eq 1 ] || fail "changed PPM_DIR left a stale block"
+grep -q "^export PATH=\"$PREFIX2/bin:\$PATH\"$" "$rc" || fail "PATH block was not replaced for the new PPM_DIR"
+if grep -q "export PATH=\"$PREFIX/bin" "$rc"; then
+  fail "old PPM_DIR still referenced in the rc"
+fi
+
+# --- 4: a non-zsh/non-bash shell gets a one-liner and no rc edit -----------
+FISH_HOME="$TMP/home-fish"
+mkdir -p "$FISH_HOME"
+PATH="$STUBBIN:$PATH" HOME="$FISH_HOME" SHELL=/usr/bin/fish PPM_DIR="$FISH_HOME/ppm" \
+  PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" \
+  sh "$ROOT/install.sh" >"$TMP/install-fish.log" 2>&1
+grep -q "fish_add_path" "$TMP/install-fish.log" || fail "fish user got no one-liner"
+[ ! -f "$FISH_HOME/.zshrc" ] || fail "fish user got a zshrc edit"
+[ ! -f "$FISH_HOME/.bashrc" ] || fail "fish user got a bashrc edit"
+
+# --- 5: default prefix resolution (XDG, then ~/.local/share/ppm) -----------
+XDG_HOME="$TMP/home-xdg"
+mkdir -p "$XDG_HOME"
+printf 'export FOO=bar\n' > "$XDG_HOME/.zshrc"
+PATH="$STUBBIN:$PATH" HOME="$XDG_HOME" SHELL=/usr/bin/zsh XDG_DATA_HOME="$TMP/xdg" \
+  PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" \
+  sh "$ROOT/install.sh" >"$TMP/install-xdg.log" 2>&1
+[ -x "$TMP/xdg/ppm/bin/ppmr" ] || fail "XDG_DATA_HOME/ppm was not honoured"
+grep -q '^# >>> ppm >>>$' "$XDG_HOME/.zshrc" || fail "XDG install did not add a PATH block"
+
+DEF_HOME="$TMP/home-def"
+mkdir -p "$DEF_HOME"
+printf 'export FOO=bar\n' > "$DEF_HOME/.zshrc"
+PATH="$STUBBIN:$PATH" HOME="$DEF_HOME" SHELL=/usr/bin/zsh \
+  PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" \
+  sh "$ROOT/install.sh" >"$TMP/install-def.log" 2>&1
+[ -x "$DEF_HOME/.local/share/ppm/bin/ppmr" ] || fail "default prefix was not ~/.local/share/ppm"
+grep -q '^# >>> ppm >>>$' "$DEF_HOME/.zshrc" || fail "default install did not add a PATH block"
+
+# --- 7: failure paths ------------------------------------------------------
 # missing asset: a version with no tarball on the server
-if PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION=vNOPE PPM_BIN_DIR="$TMP/x1" \
+if PATH="$STUBBIN:$PATH" HOME="$HOME_DIR" SHELL=/usr/bin/zsh PPM_DIR="$TMP/x1" \
+    PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION=vNOPE \
     sh "$ROOT/install.sh" >"$TMP/f1.log" 2>&1; then
   fail "missing-asset case exited 0"
 fi
@@ -148,7 +228,8 @@ case "$1" in
 esac
 EOF
 chmod +x "$STUBBIN/uname"
-if PATH="$STUBBIN:$PATH" PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" PPM_BIN_DIR="$TMP/x2" \
+if PATH="$STUBBIN:$PATH" HOME="$HOME_DIR" SHELL=/usr/bin/zsh PPM_DIR="$TMP/x2" \
+    PPM_REPO="$REPO" PPM_BASE_URL="$BASE" PPM_VERSION="$VERSION" \
     sh "$ROOT/install.sh" >"$TMP/f2.log" 2>&1; then
   fail "unsupported-platform case exited 0"
 fi

@@ -88,8 +88,8 @@ $(FFMPEG):
 
 # Assemble the per-platform release tarball that install.sh downloads. The
 # layout mirrors bin/ at the top level (no bin/ prefix): install.sh unpacks it
-# straight into the install directory, where find_tool's exe_dir/ffmpeg lookup
-# and ppmr's dirname($0)/ffmpeg lookup both find the bundled pair.
+# at the prefix root (PPM_DIR), where find_tool's exe_dir/ffmpeg lookup and
+# ppmr's dirname($0)/ffmpeg lookup both find the bundled pair.
 #
 # The version must match the release tag exactly (e.g. v0.1.0), because
 # install.sh builds the download URL from it. Default to the newest tag; pass
@@ -104,11 +104,12 @@ PLATFORM := $(OS)-$(ARCH)
 
 release: all ffmpeg
 	@rm -rf out/release
-	@mkdir -p out/release/bin/ffmpeg out/release/shaders
+	@mkdir -p out/release/bin/ffmpeg out/release/shaders out/release/include
 	@cp bin/ppm-video bin/ppm-media bin/ppm-prompt bin/ppmr out/release/bin/
 	@cp ffmpeg/ffmpeg ffmpeg/ffprobe out/release/bin/ffmpeg/
 	@cp $(SHADERS) out/release/shaders/
-	@tar -czf "out/release/ppm-$(RELEASE_VERSION)-$(PLATFORM).tar.gz" -C out/release bin shaders
+	@cp $(HEADERS) out/release/include/
+	@tar -czf "out/release/ppm-$(RELEASE_VERSION)-$(PLATFORM).tar.gz" -C out/release bin shaders include
 	@printf 'release tarball: out/release/ppm-%s-%s.tar.gz\n' "$(RELEASE_VERSION)" "$(PLATFORM)"
 	@printf 'upload with:     gh release upload %s out/release/ppm-%s-%s.tar.gz\n' \
 	  "$(RELEASE_VERSION)" "$(RELEASE_VERSION)" "$(PLATFORM)"

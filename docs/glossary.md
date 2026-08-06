@@ -9,8 +9,13 @@ use them verbatim in specs, tickets, and code.
   **release tarball** per platform: `ppm-<version>-<os>-<arch>.tar.gz`.
 - **platform** — the `os-arch` pair the installer resolves (e.g. `darwin-arm64`,
   `linux-x64`).
-- **BIN_DIR** — the directory the installer unpacks into (default: first
-  writable dir on PATH, or `~/.local/bin`).
+- **PPM_DIR** — the dedicated ppm prefix that holds everything the CLIs need at
+  run time: `bin/` (the CLIs + bundled pair), `shaders/`, `include/`, and the
+  compile cache `.cache/`. Resolution order: `$PPM_DIR` env →
+  `$XDG_DATA_HOME/ppm` → `~/.local/share/ppm` (ADR 0005).
+- **PATH block** — the marker-delimited line `export PATH="$PPM_DIR/bin:$PATH"`
+  that `install.sh` appends to `~/.zshrc` / `~/.bashrc` (deduplicated and
+  replaced on reinstall) so the CLIs are reachable without symlinks or copies.
 - **bundled pair** — the vendored `ffmpeg` + `ffprobe` shipped inside every
   release tarball at `bin/ffmpeg/`.
 - **matched pair** — a rule: the ffmpeg and ffprobe used for one run must come
