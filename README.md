@@ -230,6 +230,12 @@ is plumbing the binaries encapsulate, so only the skill's own copy matters.
 cp docs/{frames,frame-metadata,scene-schema,design-tokens,shader-authoring}.json skills/media/
 ```
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/WEEFAA/ppm/master/install.sh | sh
+```
+
 ## Requirements
 
 - A C++17 compiler
